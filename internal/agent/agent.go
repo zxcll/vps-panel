@@ -27,7 +27,7 @@ import (
 )
 
 // Version 是探针版本，上报给面板用于提示升级。
-const Version = "1.1.0"
+const Version = "1.1.1"
 
 type Config struct {
 	// Server 是面板地址，支持 wss:// ws:// https:// http:// 四种写法。

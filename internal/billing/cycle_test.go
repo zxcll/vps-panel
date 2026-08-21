@@ -238,8 +238,8 @@ func TestDaysInMonth(t *testing.T) {
 		"2028年2月": {2028, time.February, 29},
 		"2100年2月": {2100, time.February, 28}, // 整百非闰年
 		"2000年2月": {2000, time.February, 29}, // 400 年闰
-		"4月":     {2026, time.April, 30},
-		"12月":    {2026, time.December, 31},
+		"4月":      {2026, time.April, 30},
+		"12月":     {2026, time.December, 31},
 	}
 	for name, tc := range cases {
 		if got := DaysInMonth(tc.y, tc.m); got != tc.want {

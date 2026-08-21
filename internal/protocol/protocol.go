@@ -121,7 +121,36 @@ const (
 	CmdShutdown = "shutdown" // 关机
 	CmdExec     = "exec"     // 执行自定义命令（如停止代理服务）
 	CmdReport   = "report"   // 要求立即上报一次
+	// CmdForwardTest 让探针拨一次指定地址，并汇报本机的转发能力。
+	// 请求参数放在 Command.Probe 里。它不执行任何命令，
+	// 所以不受 --allow-exec 约束，只受 --allow-forward 约束。
+	CmdForwardTest = "forward_test"
 )
+
+// ForwardProbe 是 CmdForwardTest 的结果，序列化后放在 CommandResult.Output 里。
+//
+// 除了「能不能连上」，还带回本机的转发能力体检。多跳链路不通时，
+// 光知道"连不上"没什么用，得知道是这一跳拨不出去、还是这台机器
+// 压根就没开转发开关 —— 后者恰恰是最容易被忽略、现象又最像"防火墙问题"的一种。
+type ForwardProbe struct {
+	Target    string `json:"target"`
+	OK        bool   `json:"ok"`
+	LatencyMS int    `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
+
+	// NftAvailable 为假表示这台机器上没有 nftables，内核态转发不可能生效。
+	NftAvailable bool `json:"nft_available"`
+	// IPForward 为假表示内核转发开关没开。DNAT 之后的包会被内核直接丢掉，
+	// 现象是 nft 规则看着都对但就是不通，而且 conntrack 里连条目都没有。
+	IPForward bool `json:"ip_forward"`
+	// Listening 为真表示这一跳的监听端口上确实有东西在等着（用户态模式）。
+	// 内核态转发不需要监听进程，所以这项为假不代表有问题。
+	Listening bool `json:"listening"`
+	// Firewalls 是检测到的本机防火墙工具，探针已经往它们的用户扩展链里插过放行规则。
+	Firewalls []string `json:"firewalls,omitempty"`
+	// RuleCount 是探针当前实际生效的转发规则条数，用来核对面板下发有没有到位。
+	RuleCount int `json:"rule_count"`
+}
 
 type Command struct {
 	ID         string `json:"id"`
@@ -130,6 +159,18 @@ type Command struct {
 	TimeoutSec int    `json:"timeout_sec,omitempty"`
 	// Reason 会写进探针日志，方便事后查"这台机器为什么被关了"。
 	Reason string `json:"reason,omitempty"`
+	// Probe 只在 CmdForwardTest 时有意义。单独开一个字段而不是复用
+	// Script/TimeoutSec：TimeoutSec 是 Hub 用来算等待超时的，
+	// 往里塞端口号会让面板等上几个小时。
+	Probe *ProbeRequest `json:"probe,omitempty"`
+}
+
+// ProbeRequest 是一次连通性测试的请求。
+type ProbeRequest struct {
+	// Target 是要拨的地址（host:port）。留空表示只做本机转发能力体检，不拨号。
+	Target string `json:"target"`
+	// ListenPort 是这一跳在本机的监听端口，用来判断用户态转发起没起来。0 表示不检查。
+	ListenPort int `json:"listen_port,omitempty"`
 }
 
 type CommandResult struct {

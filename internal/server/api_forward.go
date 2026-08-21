@@ -134,12 +134,9 @@ func (req *forwardRequest) validate() error {
 		}
 		seen[h.NodeID] = true
 
-		// 入口端口是用户要连的地址，不能自动分配；中间跳可以留 0 让面板挑。
-		if i == 0 && (h.ListenPort < 1 || h.ListenPort > 65535) {
-			return fmt.Errorf("入口监听端口 %d 不合法，应在 1-65535 之间", h.ListenPort)
-		}
+		// 0 表示让面板从该节点配置的端口范围里随机挑一个，入口跳也支持。
 		if h.ListenPort != 0 && (h.ListenPort < 1 || h.ListenPort > 65535) {
-			return fmt.Errorf("第 %d 跳的监听端口 %d 不合法", i+1, h.ListenPort)
+			return fmt.Errorf("第 %d 跳的监听端口 %d 不合法，应在 1-65535 之间（填 0 表示自动分配）", i+1, h.ListenPort)
 		}
 
 		if h.Mode == "" {
@@ -182,6 +179,13 @@ func (s *Server) applyForwardRequest(ctx context.Context, req *forwardRequest, r
 			used, err := s.st.UsedForwardPorts(ctx, h.NodeID, r.ID)
 			if err != nil {
 				return fmt.Errorf("查询节点已占用端口: %w", err)
+			}
+			// 本次请求里用户手填的端口也要避开：库里还没有它们，
+			// 但保存时会一起写进去，撞上就会被唯一约束打回来。
+			for _, other := range req.Hops {
+				if other.NodeID == h.NodeID && other.ListenPort > 0 {
+					used[other.ListenPort] = "pending"
+				}
 			}
 			fn := fwdNodes[h.NodeID]
 			if fn == nil {

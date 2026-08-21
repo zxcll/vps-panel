@@ -287,9 +287,19 @@ FWD=$(api POST /api/forwards "{\"name\":\"验收转发\",\"proto\":\"tcp\",
   \"dest_host\":\"1.2.3.4\",\"dest_port\":443,\"enabled\":true,
   \"hops\":[{\"node_id\":$NID2,\"listen_port\":18443,\"mode\":\"kernel\"}]}")
 HOP=$(echo "$FWD" | jq -r '.hops[0].id')
+FWD_ID=$(echo "$FWD" | jq -r '.id')
 [ -n "$HOP" ] && [ "$HOP" != "null" ] && pass "转发规则已创建（hop_id=$HOP）" || fail "转发规则创建失败：$FWD"
 
-ENTRY=$(api GET /api/forwards | jq -r '.[0].entry_address')
+AUTO=$(api POST /api/forwards "{\"name\":\"自动端口\",\"proto\":\"tcp\",
+  \"dest_host\":\"1.1.1.1\",\"dest_port\":443,\"enabled\":false,
+  \"hops\":[{\"node_id\":$NID2,\"listen_port\":0,\"mode\":\"kernel\"}]}" | jq -r '.hops[0].listen_port')
+if [ "$AUTO" -ge 20000 ] && [ "$AUTO" -le 29999 ]; then
+    pass "监听端口留空时从节点端口范围内自动分配（分到 $AUTO）"
+else
+    fail "自动分配的端口 $AUTO 不在 20000-29999 范围内"
+fi
+
+ENTRY=$(api GET /api/forwards | jq -r '.[] | select(.id == '"$FWD_ID"') | .entry_address')
 [ "$ENTRY" = "203.0.113.9:18443" ] && pass "入口地址推导正确（$ENTRY）" \
     || fail "入口地址错了：$ENTRY"
 
@@ -338,6 +348,31 @@ fwd_report "$SECRET2" '{"boot_id":"fb1","iface":"eth0","rx":6442450944,"tx":6442
 SURVIVED=$(node_field "$NID2" .usage.rx_bytes)
 [ "$SURVIVED" = "6442450944" ] && pass "上报里含已删除的跳时，网卡账本照常入账" \
     || fail "未知 hop_id 让整次上报失败了：rx=$SURVIVED"
+
+# 链路测试。探测指令要走 WebSocket 下发，所以先给这个节点起一个真探针
+# （前面的转发计数是直接 POST 上报的，没有长连接）。
+"$AGENT" --server "$BASE" --secret "$SECRET2" --fake-traffic "1KB/s" --interval 5s \
+    --forward-state "$WORK/fwd-state.json" --log-level warn >>"$WORK/agent.log" 2>&1 &
+TEST_AGENT_PID=$!
+disown "$TEST_AGENT_PID" 2>/dev/null || true
+# 等它连上来
+for _ in $(seq 1 20); do
+    [ "$(api GET "/api/nodes/$NID2" | jq -r .agent_online)" = "true" ] && break
+    sleep 0.5
+done
+
+TEST_OUT=$(api POST "/api/forwards/$FWD_ID/test" '{}' 2>/dev/null || echo '{}')
+TEST_LEGS=$(echo "$TEST_OUT" | jq -r '.legs | length')
+[ "$TEST_LEGS" = "1" ] && pass "链路测试逐跳返回了结果" || fail "链路测试没有返回逐跳结果：$TEST_OUT"
+
+# 不管目标通不通，节点侧的自检信息必须带回来 ——
+# 排查「nft 规则都在就是不通」时，要看的正是这几项。
+TEST_DIAG=$(echo "$TEST_OUT" | jq -r '.legs[0].diagnosis.ip_forward // "缺失"')
+[ "$TEST_DIAG" != "缺失" ] && pass "链路测试带回了节点自检信息（转发开关状态）" \
+    || fail "链路测试没带回自检信息：$TEST_OUT"
+
+kill -9 "$TEST_AGENT_PID" 2>/dev/null || true
+sleep 0.5
 
 # 节点被禁用时规则要报「未生效」，而不是静悄悄消失
 api PUT "/api/nodes/$NID2" '{"name":"转发中转","ipv4":"203.0.113.9","quota_bytes":0,

@@ -375,31 +375,72 @@ func TestEntryAddress(t *testing.T) {
 	}
 }
 
-func TestAllocPort(t *testing.T) {
+func TestAllocPortStaysInRangeAndSkipsUsed(t *testing.T) {
 	fn := store.DefaultForwardNode(1)
+	used := map[int]string{}
 
-	got, err := AllocPort(fn, map[int]string{})
-	if err != nil || got != store.DefaultForwardPortStart {
-		t.Errorf("空占用时应取范围起点，实际 %d, err=%v", got, err)
+	// 连续分配一批，每个都必须落在范围内且互不相同。
+	for i := range 50 {
+		p, err := AllocPort(fn, used)
+		if err != nil {
+			t.Fatalf("第 %d 次分配失败: %v", i+1, err)
+		}
+		if p < fn.PortStart || p > fn.PortEnd {
+			t.Fatalf("分到了范围外的端口 %d（范围 %d-%d）", p, fn.PortStart, fn.PortEnd)
+		}
+		if _, dup := used[p]; dup {
+			t.Fatalf("分到了已占用的端口 %d", p)
+		}
+		used[p] = "tcp"
 	}
+}
 
-	used := map[int]string{20000: "tcp", 20001: "udp"}
-	got, err = AllocPort(fn, used)
-	if err != nil || got != 20002 {
-		t.Errorf("应跳过已占用端口，实际 %d, err=%v", got, err)
+// 随机取而不是顺序取：顺序取的话所有节点的第一条规则都会落在 20000，
+// 既不好认也可预测。这条用例只钉「确实是随机的」，不钉具体取到哪个。
+func TestAllocPortIsRandom(t *testing.T) {
+	fn := store.DefaultForwardNode(1)
+	seen := map[int]bool{}
+	for range 30 {
+		p, err := AllocPort(fn, map[int]string{})
+		if err != nil {
+			t.Fatalf("分配失败: %v", err)
+		}
+		seen[p] = true
 	}
+	if len(seen) < 5 {
+		t.Errorf("30 次分配只取到 %d 个不同端口，看起来不是随机的", len(seen))
+	}
+}
 
-	// 同端口不同协议也一律避开：中间端口不值得精打细算，
-	// 撞在一起只会让排查变难。
-	narrow := &store.ForwardNode{NodeID: 1, PortStart: 30000, PortEnd: 30000, Enabled: true}
-	if _, err := AllocPort(narrow, map[int]string{30000: "tcp"}); err == nil {
+func TestAllocPortFallsBackToScanWhenNearlyFull(t *testing.T) {
+	// 范围里只剩一个坑位，随机大概率试不中，必须靠顺序扫描兜底。
+	fn := &store.ForwardNode{NodeID: 1, PortStart: 30000, PortEnd: 30009, Enabled: true}
+	used := map[int]string{}
+	for p := 30000; p <= 30009; p++ {
+		used[p] = "tcp"
+	}
+	delete(used, 30007)
+
+	got, err := AllocPort(fn, used)
+	if err != nil || got != 30007 {
+		t.Errorf("应扫描出唯一空闲端口 30007，实际 %d, err=%v", got, err)
+	}
+}
+
+func TestAllocPortErrors(t *testing.T) {
+	full := &store.ForwardNode{NodeID: 1, PortStart: 30000, PortEnd: 30000, Enabled: true}
+	if _, err := AllocPort(full, map[int]string{30000: "tcp"}); err == nil {
 		t.Error("范围用满时应报错")
 	}
 
 	// 范围配歪了（起点大于终点）要回落到默认范围，而不是直接失败。
 	broken := &store.ForwardNode{NodeID: 1, PortStart: 500, PortEnd: 100, Enabled: true}
-	if got, err := AllocPort(broken, map[int]string{}); err != nil || got != store.DefaultForwardPortStart {
-		t.Errorf("范围非法时应回落默认，实际 %d, err=%v", got, err)
+	got, err := AllocPort(broken, map[int]string{})
+	if err != nil {
+		t.Fatalf("范围非法时应回落默认范围，实际报错: %v", err)
+	}
+	if got < store.DefaultForwardPortStart || got > store.DefaultForwardPortEnd {
+		t.Errorf("回落后分到 %d，不在默认范围内", got)
 	}
 }
 

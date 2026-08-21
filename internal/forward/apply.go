@@ -89,15 +89,29 @@ func sysctlEnabled(path string) bool {
 	return strings.TrimSpace(string(data)) == "1"
 }
 
+// 这三个做成变量而不是直接调函数，是为了测试能替换掉 —— 它们都要读写
+// /proc 和 /etc，在测试里没法真的动。
+var (
+	ipForwardEnabled   = func() bool { return sysctlEnabled("/proc/sys/net/ipv4/ip_forward") }
+	ipv6ForwardEnabled = func() bool { return sysctlEnabled("/proc/sys/net/ipv6/conf/all/forwarding") }
+	enableIPForward    = doEnableIPForward
+)
+
 // IPForwardEnabled 报告 IPv4 转发开关的状态。
-func IPForwardEnabled() bool { return sysctlEnabled("/proc/sys/net/ipv4/ip_forward") }
+func IPForwardEnabled() bool { return ipForwardEnabled() }
 
 // IPv6ForwardEnabled 报告 IPv6 转发开关的状态。
-func IPv6ForwardEnabled() bool { return sysctlEnabled("/proc/sys/net/ipv6/conf/all/forwarding") }
+func IPv6ForwardEnabled() bool { return ipv6ForwardEnabled() }
 
 // EnableIPForward 打开内核转发开关并写进 sysctl.d，重启后依然生效。
-// 没开这个开关的话 DNAT 之后的包会被内核直接丢掉，现象是「规则看着对但就是不通」。
-func EnableIPForward() error {
+//
+// 没开这个开关的话 DNAT 之后的包会被内核直接丢掉，现象是「规则看着对但就是不通」，
+// 而且 conntrack 里连条目都不会有，非常难查。调用方见 kernelBackend.ensureIPForward。
+func EnableIPForward() error { return enableIPForward() }
+
+func doEnableIPForward() error {
+	// 先写 /proc 让它立刻生效，再写 sysctl.d 让它重启后还在。
+	// 两件事分开做：/proc 写失败（容器里没权限）不该妨碍写配置文件，反之亦然。
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1\n"), 0o644)
 	body := "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n"

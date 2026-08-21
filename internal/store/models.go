@@ -157,14 +157,14 @@ const (
 )
 
 type DNSRecord struct {
-	ID          int64  `json:"id"`
-	ProviderID  int64  `json:"provider_id"`
-	Zone        string `json:"zone"`
-	Name        string `json:"name"`
-	RecordType  string `json:"record_type"`
-	TTL         int    `json:"ttl"`
-	Proxied     bool   `json:"proxied"`
-	Strategy    string `json:"strategy"`
+	ID         int64  `json:"id"`
+	ProviderID int64  `json:"provider_id"`
+	Zone       string `json:"zone"`
+	Name       string `json:"name"`
+	RecordType string `json:"record_type"`
+	TTL        int    `json:"ttl"`
+	Proxied    bool   `json:"proxied"`
+	Strategy   string `json:"strategy"`
 
 	SwitchOnExceed  bool `json:"switch_on_exceed"`
 	SwitchOnOffline bool `json:"switch_on_offline"`
@@ -237,11 +237,11 @@ type ForwardRule struct {
 
 // ForwardHop 是规则在某台机器上的一跳。Position 从 0 开始，0 即入口。
 type ForwardHop struct {
-	ID         int64  `json:"id"`
-	RuleID     int64  `json:"rule_id"`
-	Position   int    `json:"position"`
-	NodeID     int64  `json:"node_id"`
-	ListenPort int    `json:"listen_port"`
+	ID         int64 `json:"id"`
+	RuleID     int64 `json:"rule_id"`
+	Position   int   `json:"position"`
+	NodeID     int64 `json:"node_id"`
+	ListenPort int   `json:"listen_port"`
 	// Proto 是从规则冗余下来的，用于支撑 (node_id, listen_port, proto) 唯一约束。
 	Proto         string `json:"proto"`
 	Mode          string `json:"mode"`

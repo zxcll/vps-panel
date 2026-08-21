@@ -32,6 +32,8 @@ type kernelBackend struct {
 //
 // tc 失败只记日志不往上抛 —— 限速没了顶多跑满带宽，比整条转发不通要好。
 func (k *kernelBackend) Reconcile(rules []Rule) error {
+	k.ensureIPForward(rules)
+
 	if err := Apply(rules); err != nil {
 		return err
 	}
@@ -50,6 +52,43 @@ func (k *kernelBackend) Reconcile(rules []Rule) error {
 	k.applied = append([]Rule(nil), rules...)
 	k.mu.Unlock()
 	return nil
+}
+
+// ensureIPForward 在下发内核态规则前确认转发开关是开的，没开就打开。
+//
+// 这一步不能省。DNAT 只改包的目标地址，改完还得靠内核把包路由出去；
+// ip_forward=0 时内核会在 forward 钩子之前把包直接丢掉，
+// 现象是「nft 里规则都在、conntrack 里什么都没有、抓包只看得到 SYN 进来」，
+// 排查起来极其费劲。
+//
+// 只在真有内核态规则时才动系统设置：没配转发的机器不该被我们改内核参数。
+func (k *kernelBackend) ensureIPForward(rules []Rule) {
+	if len(rules) == 0 {
+		return
+	}
+
+	needV6 := false
+	for _, r := range rules {
+		if IsIPv6(r.DestIP) {
+			needV6 = true
+			break
+		}
+	}
+	if ipForwardEnabled() && (!needV6 || ipv6ForwardEnabled()) {
+		return
+	}
+
+	if err := enableIPForward(); err != nil {
+		// 写 sysctl.d 失败不影响本次运行（/proc 那两下是分开写的），
+		// 只是重启后要再开一次。
+		k.log.Warn("转发开关已开启，但没能写进 sysctl 配置，重启后需要重新开启", "错误", err)
+	}
+	if !ipForwardEnabled() {
+		k.log.Error("无法开启内核转发开关（net.ipv4.ip_forward），内核态转发不会生效",
+			"提示", "容器里跑探针的话需要 --privileged 或宿主机上开启")
+		return
+	}
+	k.log.Info("已自动开启内核转发开关，内核态转发规则才能真正生效")
 }
 
 // Counters 读回 nft 计数并归并到 HopID 上。

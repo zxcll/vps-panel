@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -31,6 +32,29 @@ func (a *Agent) execute(ctx context.Context, cmd protocol.Command) protocol.Comm
 		// 关键顺序：先把最后一段流量报上去，再关机。
 		// 反过来的话这段流量就永远丢了。
 		go a.shutdown(cmd.Reason)
+
+	case protocol.CmdForwardTest:
+		// 只是拨个号 + 读几个只读状态，不执行任何命令，
+		// 所以不受 --allow-exec 约束，只看转发功能本身开没开。
+		if a.fwd == nil {
+			res.Error = "该探针启动时禁用了端口转发（--allow-forward=false）"
+			return res
+		}
+		req := cmd.Probe
+		if req == nil {
+			req = &protocol.ProbeRequest{}
+		}
+		probe := a.fwd.Probe(ctx, strings.TrimSpace(req.Target))
+		if req.ListenPort > 0 {
+			probe.Listening = a.fwd.ProbeListen(req.ListenPort)
+		}
+		out, err := json.Marshal(probe)
+		if err != nil {
+			res.Error = "序列化探测结果失败: " + err.Error()
+			return res
+		}
+		res.Output = string(out)
+		res.OK = true
 
 	case protocol.CmdExec:
 		if !a.cfg.AllowExec {

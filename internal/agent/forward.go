@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,6 +27,10 @@ const forwardStateVersion = 1
 // 只有解析结果真的变了才会重新 apply —— apply 会清零 nft 计数，
 // 无谓的重试会让计数在面板上看起来一跳一跳的。
 const dnsRefreshInterval = 60 * time.Second
+
+// probeTimeout 是连通性测试的拨号上限。给得比较短：这是人点了「测试」在等结果，
+// 拨不通的话快点告诉他比精确区分"慢"和"不通"更重要。
+const probeTimeout = 5 * time.Second
 
 // forwardState 是要跨进程重启保留的转发状态。
 type forwardState struct {
@@ -271,6 +276,53 @@ func (f *forwarder) Samples() []protocol.ForwardSample {
 	}
 	f.save()
 	return out
+}
+
+// Probe 拨一次目标地址，并汇报本机的转发能力体检结果。
+//
+// 目标为空时只做体检不拨号 —— 面板测最后一跳到落地目标的连通性时会传地址，
+// 而单纯想看看某台机器转发能力是否正常时不需要拨。
+func (f *forwarder) Probe(ctx context.Context, target string) protocol.ForwardProbe {
+	f.mu.Lock()
+	rules := append([]forward.Rule(nil), f.rules...)
+	f.mu.Unlock()
+
+	p := protocol.ForwardProbe{
+		Target:       target,
+		NftAvailable: forward.Available(),
+		IPForward:    forward.IPForwardEnabled(),
+		Firewalls:    f.dp.DetectedFirewalls(),
+		RuleCount:    len(rules),
+	}
+
+	if target == "" {
+		p.OK = true
+		return p
+	}
+
+	start := time.Now()
+	d := net.Dialer{Timeout: probeTimeout}
+	conn, err := d.DialContext(ctx, "tcp", target)
+	p.LatencyMS = int(time.Since(start).Milliseconds())
+	if err != nil {
+		p.Error = err.Error()
+		return p
+	}
+	conn.Close()
+	p.OK = true
+	return p
+}
+
+// ProbeListen 判断本机某个端口上有没有监听进程。
+// 用户态转发要靠监听进程接活，没有就是没生效；内核态不需要监听，所以这项为假不算问题。
+func (f *forwarder) ProbeListen(port int) bool {
+	// 直接试着占一下这个端口：占得住说明没人在听。
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return true
+	}
+	ln.Close()
+	return false
 }
 
 // warnings 返回"规则生效了但有隐患"的提示，回执里带给面板。

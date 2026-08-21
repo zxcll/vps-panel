@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	auth("PUT /api/forwards/{id}", s.handleUpdateForward)
 	auth("DELETE /api/forwards/{id}", s.handleDeleteForward)
 	auth("POST /api/forwards/{id}/toggle", s.handleToggleForward)
+	auth("POST /api/forwards/{id}/test", s.handleTestForward)
 
 	auth("GET /api/events", s.handleListEvents)
 	auth("GET /api/settings", s.handleGetSettings)

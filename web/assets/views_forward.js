@@ -48,8 +48,9 @@ const ForwardEditor = {
             if (!id) return;
             hops.value.push({
                 node_id: Number(id),
-                // 入口端口必须用户自己定（他要往这里连）；中间跳留 0 让面板分配。
-                listen_port: hops.value.length === 0 ? 8443 : 0,
+                // 一律默认 0：由面板从该节点配置的端口范围里随机挑一个。
+                // 想指定入口端口（比如客户端配置里已经写死了）就自己改成具体数字。
+                listen_port: 0,
                 mode: "kernel",
                 bandwidth_mbps: 0,
             });
@@ -64,8 +65,6 @@ const ForwardEditor = {
             if (j < 0 || j >= hops.value.length) return;
             const arr = hops.value;
             [arr[i], arr[j]] = [arr[j], arr[i]];
-            // 换到第一位的跳成了入口，端口不能再是"自动分配"。
-            if (arr[0].listen_port === 0) arr[0].listen_port = 8443;
         }
 
         // UDP 不支持用户态转发，切成 UDP 时把已选的用户态跳改回内核态，
@@ -180,7 +179,7 @@ const ForwardEditor = {
                                 <td>{{ nodeName(h.node_id) }}</td>
                                 <td>
                                     <input type="number" min="0" max="65535" v-model="h.listen_port"
-                                           :placeholder="i === 0 ? '必填' : '0 = 自动'">
+                                           placeholder="0 = 自动分配">
                                 </td>
                                 <td>
                                     <select v-model="h.mode">
@@ -211,8 +210,15 @@ const ForwardEditor = {
                             <option v-for="n in available" :key="n.id" :value="n.id">{{ n.name }}</option>
                         </select>
                         <div class="field-hint">
-                            入口端口要自己定（用户往这里连）；中间跳填 0 由面板在节点的端口范围里分配。
-                            限速单位是 Mbps，只作用于出方向。
+                            <b>监听端口</b>填 0（默认）就由面板从该节点「转发设置」里配的端口范围内随机挑一个；
+                            客户端配置里已经写死了某个端口的话，填具体数字。<br>
+                            <b>内核态</b>：包在内核里改个目标地址就直接转走，不经过任何用户进程，
+                            开销最低、速度最快，TCP/UDP 都支持。默认用它。<br>
+                            <b>用户态</b>：探针自己收下连接、再单独建一条到下一跳的连接。
+                            多跳串联时能避免 TCP 套 TCP 导致的拥塞叠加（表现是丢包时速度雪崩），
+                            还带预连接池省掉一次握手往返。代价是要过一遍用户进程，只支持 TCP。
+                            单跳一般用内核态；跨境多跳且线路不稳时，中间那几跳用用户态往往更快更稳。<br>
+                            <b>限速</b>单位 Mbps，0 表示不限，只作用于出方向。
                         </div>
                     </div>
                 </div>
@@ -322,8 +328,101 @@ const ForwardNodeEditor = {
     `,
 };
 
+// ForwardTestResult 展示一次链路测试的结果。
+// 逐段列出来，是因为链路不通时「哪一段断了」比「通不通」有用得多。
+const ForwardTestResult = {
+    components: { Modal },
+    props: { report: Object },
+    emits: ["close"],
+    template: `
+      <Modal :title="'链路测试 — ' + report.rule_name" wide @close="$emit('close')">
+        <div class="notice" :class="report.ok ? '' : 'error'" style="margin-bottom:16px">
+            {{ report.summary }}
+        </div>
+
+        <div class="table-scroll">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:150px">从哪里发起</th>
+                        <th>拨向</th>
+                        <th style="width:110px">结果</th>
+                        <th style="width:90px">耗时</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="leg in report.legs" :key="leg.position">
+                        <td>第 {{ leg.position + 1 }} 跳<div class="node-meta">{{ leg.from }}</div></td>
+                        <td class="mono">{{ leg.target || '—' }}</td>
+                        <td>
+                            <span class="badge" :class="leg.ok ? 'good' : 'critical'">
+                                <span class="dot"></span>{{ leg.ok ? '通' : '不通' }}
+                            </span>
+                        </td>
+                        <td class="tabular">{{ leg.latency_ms }} ms</td>
+                    </tr>
+                    <tr v-if="report.entry">
+                        <td>面板 → 入口<div class="node-meta">仅供参考</div></td>
+                        <td class="mono">{{ report.entry.target }}</td>
+                        <td>
+                            <span class="badge" :class="report.entry.ok ? 'good' : 'warning'">
+                                <span class="dot"></span>{{ report.entry.ok ? '通' : '不通' }}
+                            </span>
+                        </td>
+                        <td class="tabular">{{ report.entry.latency_ms }} ms</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <template v-for="leg in report.legs" :key="'d' + leg.position">
+            <div v-if="leg.error || (leg.diagnosis && leg.diagnosis.problems && leg.diagnosis.problems.length)"
+                 class="notice error" style="margin-top:14px">
+                <b>第 {{ leg.position + 1 }} 跳（{{ leg.from }}）</b>
+                <div v-if="leg.error" style="margin-top:6px">拨号失败：{{ leg.error }}</div>
+                <div v-for="(pb, i) in (leg.diagnosis ? leg.diagnosis.problems : [])" :key="i" style="margin-top:6px">
+                    {{ pb }}
+                </div>
+            </div>
+        </template>
+
+        <fieldset style="margin-top:16px">
+            <legend>各跳自检</legend>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>节点</th><th style="width:110px">nftables</th>
+                            <th style="width:130px">转发开关</th><th style="width:110px">端口监听</th>
+                            <th style="width:100px">已生效规则</th><th>本机防火墙</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="leg in report.legs.filter(l => l.diagnosis)" :key="'x' + leg.position">
+                            <td>{{ leg.from }}</td>
+                            <td>{{ leg.diagnosis.nft_available ? '可用' : '缺失' }}</td>
+                            <td>{{ leg.diagnosis.ip_forward ? '已开启' : '未开启' }}</td>
+                            <td>{{ leg.diagnosis.listening ? '有' : '无' }}</td>
+                            <td class="tabular">{{ leg.diagnosis.rule_count }}</td>
+                            <td>{{ (leg.diagnosis.firewalls || []).join('、') || '未检测到' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="field-hint" style="margin-top:8px">
+                内核态转发不需要监听进程，所以「端口监听」为「无」是正常的；用户态转发则必须有。
+            </div>
+        </fieldset>
+
+        <div class="modal-actions">
+            <button class="btn primary" @click="$emit('close')">知道了</button>
+        </div>
+      </Modal>
+    `,
+};
+
 export const ForwardView = {
-    components: { ForwardEditor, ForwardNodeEditor },
+    components: { ForwardEditor, ForwardNodeEditor, ForwardTestResult },
     setup() {
         const rules = ref([]);
         const nodes = ref([]);
@@ -333,6 +432,8 @@ export const ForwardView = {
         const editRule = ref(null);
         const editNode = ref(null);
         const busy = ref(0);
+        const testing = ref(0);
+        const testReport = ref(null);
         let timer = null;
 
         async function load(silent = false) {
@@ -401,6 +502,17 @@ export const ForwardView = {
             }
         }
 
+        async function runTest(rule) {
+            testing.value = rule.id;
+            try {
+                testReport.value = await api(`/api/forwards/${rule.id}/test`, { method: "POST", body: {} });
+            } catch (e) {
+                toast(e.message, "error");
+            } finally {
+                testing.value = 0;
+            }
+        }
+
         function copy(text) {
             if (!text) return;
             navigator.clipboard?.writeText(text).then(
@@ -420,6 +532,7 @@ export const ForwardView = {
 
         return {
             rules, nodes, fwdNodes, loading, syncing, editRule, editNode, busy,
+            testing, testReport, runTest,
             load, toggle, remove, syncAll, copy, fmtBytes, totalShare,
         };
     },
@@ -505,6 +618,9 @@ export const ForwardView = {
                                 </td>
                                 <td>
                                     <div class="btn-row">
+                                        <button class="btn small" :disabled="testing === r.id" @click="runTest(r)">
+                                            <span v-if="testing === r.id" class="spinner"></span>测试
+                                        </button>
                                         <button class="btn small" :disabled="!r.entry_address" @click="copy(r.entry_address)">复制入口</button>
                                         <button class="btn small" :disabled="busy === r.id" @click="toggle(r)">
                                             {{ r.enabled ? '停用' : '启用' }}
@@ -562,6 +678,7 @@ export const ForwardView = {
                            @close="editRule = null" @saved="editRule = null; load()" />
             <ForwardNodeEditor v-if="editNode" :item="editNode"
                                @close="editNode = null" @saved="editNode = null; load()" />
+            <ForwardTestResult v-if="testReport" :report="testReport" @close="testReport = null" />
         </div>
     `,
 };

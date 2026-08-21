@@ -111,7 +111,7 @@ func (e *Executor) run(
 				errs = append(errs, "探针通道: 探针当前离线")
 				continue
 			}
-			cmd.ID = newCommandID(n.ID)
+			cmd.ID = NewCommandID(n.ID)
 			res, err := e.agent.Send(ctx, n.ID, cmd)
 			if err != nil {
 				errs = append(errs, "探针通道: "+err.Error())
@@ -217,7 +217,8 @@ func StopsMachine(a string) bool {
 
 var cmdSeq atomic.Uint64
 
-// newCommandID 生成全局唯一的指令 ID，探针用它把结果对应回请求。
-func newCommandID(nodeID int64) string {
+// NewCommandID 生成全局唯一的指令 ID，探针用它把结果对应回请求。
+// 导出是因为面板的转发链路测试也要直接走 Hub.Send，而 Hub 要求指令带 ID。
+func NewCommandID(nodeID int64) string {
 	return fmt.Sprintf("%d-%d-%d", nodeID, time.Now().UnixNano(), cmdSeq.Add(1))
 }

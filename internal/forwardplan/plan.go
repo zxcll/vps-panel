@@ -14,6 +14,7 @@ package forwardplan
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"sort"
 
@@ -210,16 +211,35 @@ func EntryAddress(r *store.ForwardRule, nodes map[int64]*store.Node, fwdNodes ma
 	return net.JoinHostPort(host, fmt.Sprintf("%d", first.ListenPort))
 }
 
+// randIntn 做成变量是为了测试能固定住随机性。
+var randIntn = rand.Intn
+
+// allocRandomTries 是随机挑端口的尝试次数。范围通常有上万个坑位、
+// 只占用了几个，随机几次几乎必中；试不中说明范围快满了，再走顺序扫描兜底。
+const allocRandomTries = 16
+
 // AllocPort 在节点配置的范围内挑一个还没被占用的端口。
 //
-// used 是该节点上已占用的 端口 → 协议。同端口不同协议是两个坑位，
-// 但这里一律避开：转发链路上的中间端口没必要精打细算，
-// 撞在一起反而会让「这个端口到底是谁的」变得难查。
+// 随机取而不是从头顺序取：顺序取的话所有节点的第一条规则都会落在范围起点
+// （比如清一色 20000），既不好认，也让端口变得可预测。
+//
+// used 是该节点上已占用的 端口 → 协议。同端口不同协议其实是两个坑位，
+// 但这里一律避开：中间端口没必要精打细算，撞在一起只会让
+// 「这个端口到底是谁的」变得难查。
 func AllocPort(fn *store.ForwardNode, used map[int]string) (int, error) {
 	start, end := fn.PortStart, fn.PortEnd
 	if start <= 0 || end <= 0 || start > end {
 		start, end = store.DefaultForwardPortStart, store.DefaultForwardPortEnd
 	}
+
+	span := end - start + 1
+	for range allocRandomTries {
+		p := start + randIntn(span)
+		if _, taken := used[p]; !taken {
+			return p, nil
+		}
+	}
+	// 随机没中，说明范围里剩的坑位不多了，老老实实扫一遍。
 	for p := start; p <= end; p++ {
 		if _, taken := used[p]; !taken {
 			return p, nil
