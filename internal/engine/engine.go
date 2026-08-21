@@ -124,6 +124,10 @@ func (e *Engine) Tick(ctx context.Context) {
 }
 
 // syncLiveness 维护节点的在线/离线状态，只在状态翻转时写事件，避免刷屏。
+//
+// 「在线」的定义严格限定为"探针在上报"。不能用 NodeState.Alive——
+// 那个值包含了 TCP 拨测的结果，而新建节点只要填了 IP、机器 SSH 端口通着，
+// 拨测就会成功，于是探针根本没装的节点也会显示成在线，非常误导人。
 func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg store.Settings) {
 	n := s.Node
 
@@ -132,36 +136,53 @@ func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg st
 		return
 	}
 
+	reporting := s.AgentOnline || s.HeartbeatFresh
+
 	switch {
-	case s.Alive && n.Status != store.StatusOnline:
+	case reporting:
+		if n.Status == store.StatusOnline {
+			return
+		}
 		if err := e.st.SetNodeStatus(ctx, n.ID, store.StatusOnline); err != nil {
 			e.log.Warn("更新节点状态失败", "node", n.Name, "err", err)
 			return
 		}
-		// unknown → online 是新节点第一次连上，不算"恢复"，不打扰用户
+		id := n.ID
 		if n.Status == store.StatusOffline {
-			id := n.ID
 			e.st.AddEvent(ctx, &id, store.EventNodeOnline, store.LevelInfo,
 				fmt.Sprintf("节点「%s」已恢复在线", n.Name))
 			e.notifier.Send(notify.Message{
 				Level: store.LevelInfo, Title: "节点已恢复",
 				Body: fmt.Sprintf("节点「%s」重新上线", n.Name), NodeID: n.ID, NodeName: n.Name,
 			})
-		}
-
-	case !s.Alive && n.Status != store.StatusOffline:
-		// 连续失败达到阈值才认账，一次抖动不写事件
-		if e.fo.FailCount(n.ID) < maxInt(cfg.FailThreshold, 1) {
 			return
 		}
+		// unknown → online 是探针第一次连上。这是好消息，值得记一条，
+		// 因为用户装完探针最想确认的就是"到底接上了没有"。
+		e.st.AddEvent(ctx, &id, store.EventNodeOnline, store.LevelInfo,
+			fmt.Sprintf("节点「%s」的探针已接入，开始上报流量", n.Name))
+
+	case n.LastSeen == nil:
+		// 从来没上报过：探针还没装，或者装了但连不上面板。
+		// 这不是"掉线"，不该告警，保持"待接入"让用户知道还差一步。
+		if n.Status != store.StatusUnknown {
+			if err := e.st.SetNodeStatus(ctx, n.ID, store.StatusUnknown); err != nil {
+				e.log.Warn("更新节点状态失败", "node", n.Name, "err", err)
+			}
+		}
+
+	case n.Status != store.StatusOffline:
+		// 上报过、现在断了。offline_after 本身就是防抖窗口（默认 90 秒），
+		// 这里不再叠加失败计数——那个计数是给 DNS 切换用的，
+		// 它会把"端口还通"算作存活，拿来判在线会让状态永远刷不成离线。
 		if err := e.st.SetNodeStatus(ctx, n.ID, store.StatusOffline); err != nil {
 			e.log.Warn("更新节点状态失败", "node", n.Name, "err", err)
 			return
 		}
 		id := n.ID
-		reason := s.Reason
-		if reason == "" {
-			reason = "探针失联"
+		reason := "探针失联"
+		if s.Reason != "" {
+			reason = s.Reason
 		}
 		e.st.AddEvent(ctx, &id, store.EventNodeOffline, store.LevelWarn,
 			fmt.Sprintf("节点「%s」已离线：%s", n.Name, reason))
@@ -314,11 +335,4 @@ func (e *Engine) runExceedAction(ctx context.Context, n *store.Node, reason stri
 			e.log.Warn("更新节点状态失败", "node", n.Name, "err", err)
 		}
 	}
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

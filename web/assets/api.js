@@ -210,7 +210,9 @@ export function statusMeta(status) {
         case "offline": return { cls: "critical", text: "离线" };
         case "exceeded": return { cls: "serious", text: "流量超额" };
         case "stopped": return { cls: "muted", text: "已关停" };
-        default: return { cls: "muted", text: "未知" };
+        // unknown 表示探针从未上报过。说"未知"会让人以为是面板出问题了，
+        // 说"待接入"才对得上真实情况：节点建好了，探针还没装上或还没连上。
+        default: return { cls: "muted", text: "待接入" };
     }
 }
 

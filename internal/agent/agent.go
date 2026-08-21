@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -24,7 +26,7 @@ import (
 )
 
 // Version 是探针版本，上报给面板用于提示升级。
-const Version = "1.0.0"
+const Version = "1.0.1"
 
 type Config struct {
 	// Server 是面板地址，支持 wss:// ws:// https:// http:// 四种写法。
@@ -67,6 +69,15 @@ type Agent struct {
 
 	fake *fakeTraffic
 
+	// host 是去掉 scheme 后的面板地址（含端口）。
+	host string
+	// secure 决定用 https/wss 还是 http/ws。
+	// 地址没写 scheme 时先猜一个，猜错了会在收到协议错误时自动翻转。
+	secure atomic.Bool
+	// schemeFixed 表示用户明确写了 scheme。写死了就不自动翻转——
+	// 那是明确意图，弄错了应该报错而不是偷偷改掉。
+	schemeFixed bool
+
 	mu       sync.Mutex
 	lastSnap collector.Snapshot
 	haveSnap bool
@@ -92,13 +103,21 @@ func New(cfg Config) (*Agent, error) {
 		cfg.Log = slog.Default()
 	}
 
-	a := &Agent{
-		cfg:   cfg,
-		col:   collector.New(cfg.Iface, cfg.AllIfaces),
-		log:   cfg.Log,
-		http:  &http.Client{Timeout: 20 * time.Second},
-		flush: make(chan struct{}, 1),
+	host, secure, fixed := parseServer(cfg.Server)
+	if host == "" {
+		return nil, fmt.Errorf("面板地址 %q 解析不出主机名", cfg.Server)
 	}
+
+	a := &Agent{
+		cfg:         cfg,
+		col:         collector.New(cfg.Iface, cfg.AllIfaces),
+		log:         cfg.Log,
+		http:        &http.Client{Timeout: 20 * time.Second},
+		host:        host,
+		schemeFixed: fixed,
+		flush:       make(chan struct{}, 1),
+	}
+	a.secure.Store(secure)
 
 	if cfg.FakeTraffic != "" {
 		f, err := newFakeTraffic(cfg.FakeTraffic, a.col.BootID())
@@ -114,30 +133,109 @@ func New(cfg Config) (*Agent, error) {
 
 // --- 地址推导 ---
 
-func (a *Agent) wsEndpoint() string {
-	s := strings.TrimRight(a.cfg.Server, "/")
-	switch {
-	case strings.HasPrefix(s, "https://"):
-		s = "wss://" + strings.TrimPrefix(s, "https://")
-	case strings.HasPrefix(s, "http://"):
-		s = "ws://" + strings.TrimPrefix(s, "http://")
-	case !strings.HasPrefix(s, "ws://") && !strings.HasPrefix(s, "wss://"):
-		s = "wss://" + s
+// parseServer 把面板地址拆成主机部分和协议。
+//
+// 用户经常直接填 IP:端口（面板给出的安装命令里也可能是这个形式）。
+// 这种地址一律按明文 HTTP 处理——带非标准端口的裸 IP 几乎不可能是 HTTPS，
+// 而之前默认补 https:// 会直接撞上
+// "server gave HTTP response to HTTPS client"。
+//
+// 返回的 fixed 表示用户写死了 scheme，不允许后续自动翻转。
+func parseServer(raw string) (host string, secure, fixed bool) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimRight(s, "/")
+
+	for _, p := range []struct {
+		prefix string
+		secure bool
+	}{
+		{"https://", true}, {"wss://", true},
+		{"http://", false}, {"ws://", false},
+	} {
+		if after, ok := strings.CutPrefix(s, p.prefix); ok {
+			return strings.TrimRight(after, "/"), p.secure, true
+		}
 	}
-	return s + "/agent/ws"
+	return s, guessSecure(s), false
+}
+
+// guessSecure 在地址没写 scheme 时猜一个。猜错了有自动回落兜底。
+func guessSecure(host string) bool {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		// 没写端口。域名通常配了证书走 443，裸 IP 基本是明文。
+		return net.ParseIP(host) == nil
+	}
+	switch port {
+	case "443", "8443":
+		return true
+	case "80", "8080", "8000", "3000":
+		return false
+	}
+	return net.ParseIP(h) == nil
+}
+
+func (a *Agent) wsEndpoint() string {
+	if a.secure.Load() {
+		return "wss://" + a.host + "/agent/ws"
+	}
+	return "ws://" + a.host + "/agent/ws"
 }
 
 func (a *Agent) httpEndpoint() string {
-	s := strings.TrimRight(a.cfg.Server, "/")
-	switch {
-	case strings.HasPrefix(s, "wss://"):
-		s = "https://" + strings.TrimPrefix(s, "wss://")
-	case strings.HasPrefix(s, "ws://"):
-		s = "http://" + strings.TrimPrefix(s, "ws://")
-	case !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://"):
-		s = "https://" + s
+	if a.secure.Load() {
+		return "https://" + a.host + "/agent/report"
 	}
-	return s + "/agent/report"
+	return "http://" + a.host + "/agent/report"
+}
+
+func schemeSource(fixed bool) string {
+	if fixed {
+		return "地址里已写明"
+	}
+	return "自动推断（连不上会自动换另一种）"
+}
+
+func schemeLabel(secure bool) string {
+	if secure {
+		return "https/wss"
+	}
+	return "http/ws"
+}
+
+// schemeMismatch 判断错误是不是"明文和 TLS 用反了"。
+func schemeMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, sig := range []string{
+		// 我们用了 TLS，对面是明文
+		"server gave HTTP response to HTTPS client",
+		"tls: first record does not look like a TLS handshake",
+		"tls: unknown certificate",
+		// 我们用了明文，对面是 TLS
+		"malformed HTTP response",
+		"transport connection broken",
+	} {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeFlipScheme 在协议猜错时翻转，返回 true 表示值得立刻重试。
+func (a *Agent) maybeFlipScheme(err error) bool {
+	if a.schemeFixed || !schemeMismatch(err) {
+		return false
+	}
+	old := a.secure.Load()
+	a.secure.Store(!old)
+	a.log.Warn("面板地址没写 http:// 或 https://，协议猜错了，已自动切换",
+		"从", schemeLabel(old), "到", schemeLabel(!old),
+		"建议", "把完整地址写进配置，省得每次启动都要试一轮")
+	return true
 }
 
 // --- 采集 ---
@@ -193,8 +291,9 @@ func (a *Agent) TriggerFlush() {
 // Run 一直跑到 ctx 取消。
 func (a *Agent) Run(ctx context.Context) error {
 	a.log.Info("探针启动",
-		"面板", a.cfg.Server, "上报间隔", a.cfg.ReportInterval,
-		"模式", a.cfg.Mode, "版本", Version)
+		"面板", a.host, "协议", schemeLabel(a.secure.Load()),
+		"协议来源", schemeSource(a.schemeFixed),
+		"上报间隔", a.cfg.ReportInterval, "模式", a.cfg.Mode, "版本", Version)
 
 	// 先采一次，把网卡识别结果打出来，配错了能立刻发现
 	if s, err := a.snapshot(); err != nil {
@@ -309,7 +408,17 @@ func (a *Agent) reportOnce(ctx context.Context) error {
 	return a.postReport(ctx, rep)
 }
 
+// postReport 上报一次。协议猜错时会翻转 scheme 立刻重试，
+// 不必等下一个上报周期——首次部署时那一轮失败最容易让人以为装坏了。
 func (a *Agent) postReport(ctx context.Context, rep protocol.Report) error {
+	err := a.postOnce(ctx, rep)
+	if err != nil && a.maybeFlipScheme(err) {
+		return a.postOnce(ctx, rep)
+	}
+	return err
+}
+
+func (a *Agent) postOnce(ctx context.Context, rep protocol.Report) error {
 	body, err := json.Marshal(rep)
 	if err != nil {
 		return err
@@ -361,12 +470,16 @@ func (a *Agent) runWS(ctx context.Context) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	ws, _, err := websocket.Dial(dialCtx, a.wsEndpoint(), &websocket.DialOptions{
+	dialOpts := &websocket.DialOptions{
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 		HTTPHeader: http.Header{protocol.HeaderSecret: []string{a.cfg.Secret}},
-	})
+	}
+	ws, _, err := websocket.Dial(dialCtx, a.wsEndpoint(), dialOpts)
+	if err != nil && a.maybeFlipScheme(err) {
+		ws, _, err = websocket.Dial(dialCtx, a.wsEndpoint(), dialOpts)
+	}
 	if err != nil {
-		return fmt.Errorf("连接面板: %w", err)
+		return fmt.Errorf("连接面板 %s: %w", a.wsEndpoint(), err)
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "")
 

@@ -75,7 +75,7 @@ func Load(path string) (Config, error) {
 		cfg.TrustProxyHeaders = v == "1" || strings.EqualFold(v, "true")
 	}
 
-	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	cfg.BaseURL = NormalizeBaseURL(cfg.BaseURL)
 
 	abs, err := filepath.Abs(cfg.DataDir)
 	if err != nil {
@@ -85,6 +85,30 @@ func Load(path string) (Config, error) {
 
 	return cfg, nil
 }
+
+// NormalizeBaseURL 补全面板对外地址的协议前缀。
+//
+// 用户很容易只填 "1.2.3.4:8080"。这个值会原样写进探针的配置，
+// 而探针拿到不带协议的地址只能靠猜——猜成 https 就会撞上
+// "server gave HTTP response to HTTPS client"。在源头补齐最省事。
+//
+// 补什么不靠端口号猜：面板进程只提供明文 HTTP，从来不自己终结 TLS。
+// 想走 HTTPS 必然是前面挂了 Nginx 之类的反代，那种情况用户会把
+// https://域名 写全。所以没写协议时一律补 http://。
+func NormalizeBaseURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return s
+	}
+	return "http://" + s
+}
+
+// AgentsDir 是探针二进制的存放目录，面板通过 /agent/download 分发给节点。
+func (c Config) AgentsDir() string { return filepath.Join(c.DataDir, "agents") }
 
 func (c Config) DBPath() string      { return filepath.Join(c.DataDir, "panel.db") }
 func (c Config) KeyFilePath() string { return filepath.Join(c.DataDir, "master.key") }

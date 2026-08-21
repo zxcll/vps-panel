@@ -72,8 +72,14 @@ type NodeState struct {
 	Quota quota.Status
 	// Alive 表示机器可用：探针在线，或者探针失联但 TCP 拨测通得过。
 	Alive bool
-	// AgentOnline 单指探针连接是否活跃。
+	// AgentOnline 单指探针 WebSocket 连接是否活跃。
 	AgentOnline bool
+	// HeartbeatFresh 表示最近一次上报还在有效期内（含 HTTP 上报通道）。
+	//
+	// 它和 Alive 是两回事：Alive 还包含"探针失联但端口拨得通"，
+	// 那种情况机器活着、可以继续承接解析，但探针并没有在上报。
+	// 判断节点"在线"必须用这个，不能用 Alive。
+	HeartbeatFresh bool
 	// Reason 说明 Alive=false 的原因。
 	Reason string
 }
@@ -105,10 +111,10 @@ func (m *Manager) Snapshot(ctx context.Context) (map[int64]*NodeState, error) {
 		s.Quota = quota.EvaluateNode(n, s.Usage)
 		s.AgentOnline = m.live != nil && m.live.Online(n.ID)
 
-		heartbeatFresh := n.LastSeen != nil && now.Sub(*n.LastSeen) <= offlineAfter
+		s.HeartbeatFresh = n.LastSeen != nil && now.Sub(*n.LastSeen) <= offlineAfter
 
 		switch {
-		case s.AgentOnline || heartbeatFresh:
+		case s.AgentOnline || s.HeartbeatFresh:
 			s.Alive = true
 		case cfg.TCPProbeEnabled && n.ProbeHost() != "":
 			// 探针失联，但机器可能只是探针进程挂了。拨一下端口确认。

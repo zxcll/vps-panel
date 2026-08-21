@@ -127,13 +127,75 @@ download_binary() {
     # 简单校验：ELF 文件头是 0x7F 'E' 'L' 'F'
     if ! head -c 4 "$tmp" | grep -q 'ELF'; then
         rm -f "$tmp"
-        die "下载到的不是可执行文件（多半是 404 页面），请检查仓库和版本号"
+        err "下载到的不是可执行文件（多半是 404 页面），请检查仓库和版本号"
+        return 1
     fi
 
     chmod 755 "$tmp"
     # 先下到临时文件再原子替换，升级时不会出现"下到一半的二进制"
     mv -f "$tmp" "$out"
     ok "已安装到 $out"
+}
+
+# download_agents 把各架构探针下到面板的数据目录。
+#
+# 这一步以前漏了，导致面板装好后节点端一键安装必然 404 ——
+# 面板的 /agent/download 就是从这个目录读文件的。
+download_agents() {
+    local dir="$PANEL_DATA/agents" got=0 failed=""
+    mkdir -p "$dir"
+
+    info "下载各架构探针二进制（节点端一键安装要用）"
+    for arch in amd64 arm64 arm 386; do
+        if download_binary agent "$arch" "$dir/vps-agent-linux-$arch" 2>/dev/null; then
+            got=$((got + 1))
+        else
+            failed="$failed $arch"
+        fi
+    done
+
+    if [ "$got" -gt 0 ]; then
+        ok "已就绪 $got 个架构的探针（$dir）"
+        [ -n "$failed" ] && warn "以下架构没下到，用到时再补：$failed"
+        return 0
+    fi
+
+    echo
+    err "一个架构都没下到，节点端的一键安装命令会失败。"
+    err "常见原因和对策："
+    err "  1. 仓库还没发布 Release —— 打个 tag 触发构建："
+    err "       git tag v1.0.0 && git push origin v1.0.0"
+    err "  2. 连不上 GitHub —— 换成加速前缀重试："
+    err "       GITHUB_PROXY=https://ghfast.top/ sudo bash $0 panel agents"
+    err "  3. 自己编译后放进去（需要 Go 1.26）："
+    err "       git clone https://github.com/$GITHUB_REPO && cd vps-panel && make agents"
+    err "       sudo cp data/agents/* $dir/"
+    return 1
+}
+
+# detect_public_ip 探测本机公网 IP，用来给"面板对外地址"提供一个能用的默认值。
+detect_public_ip() {
+    local ip u
+    for u in https://api.ipify.org https://ifconfig.me/ip https://ipinfo.io/ip; do
+        ip="$(curl -fsS --connect-timeout 5 "$u" 2>/dev/null | tr -d "[:space:]")"
+        case "$ip" in
+            *[0-9].*[0-9].*[0-9].*[0-9]) printf "%s" "$ip"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# normalize_url 补全协议前缀。
+#
+# 不带协议的地址会原样传给探针，而探针只能靠猜。猜成 https 连明文面板
+# 就是 "server gave HTTP response to HTTPS client"。在这里补齐最省事。
+normalize_url() {
+    local u="$1"
+    u="${u%/}"
+    case "$u" in
+        http://*|https://*) printf "%s" "$u" ;;
+        *) printf "http://%s" "$u" ;;
+    esac
 }
 
 svc_exists() { [ -f "$SYSTEMD_DIR/$1.service" ]; }
@@ -207,19 +269,49 @@ panel_install() {
     mkdir -p "$PANEL_DATA"
     chmod 750 "$PANEL_DATA"
 
+    # 面板要把探针分发给各节点，这些二进制必须先落到数据目录里。
+    # 下不到不算致命——面板本身能跑，事后用菜单补即可。
+    download_agents || true
+
     if [ "$upgrade" = 1 ]; then
         info "保留已有配置：$PANEL_ENV"
     else
-        local listen base_url
+        local listen base_url pubip port default_base
         echo
         echo "  面板保存着各节点的 SSH 凭据，直接暴露公网风险很高。"
         echo "  推荐监听 127.0.0.1，前面用 Nginx 反代 + HTTPS。"
-        echo "  如果暂时没有反代，可以填 0.0.0.0:8080 先跑起来。"
+        echo "  如果暂时没有反代，填 0.0.0.0:8080 先跑起来也行。"
         echo
-        listen="$(ask '  监听地址' '127.0.0.1:8080')"
+        listen="$(ask '  监听地址' '0.0.0.0:8080')"
+
+        # 猜一个各节点真正连得上的地址。监听地址里的 0.0.0.0 / 127.0.0.1
+        # 对别的机器毫无意义，直接拿它当默认值等于给用户挖坑。
+        port="${listen##*:}"
+        [ "$port" = "$listen" ] && port=8080
+        printf "  正在探测本机公网 IP…"
+        pubip="$(detect_public_ip)" && printf " %s\n" "$pubip" || printf " 没探到\n"
+        if [ -n "$pubip" ]; then
+            default_base="http://$pubip:$port"
+        else
+            default_base=""
+        fi
+
         echo
-        echo "  下面这个地址要让各节点的探针能访问到，会写进一键安装命令里。"
-        base_url="$(ask '  面板对外地址' "http://$listen")"
+        echo "  下面这个地址要让各节点的探针访问得到，会写进一键安装命令。"
+        echo "  有域名 + HTTPS 就填 https://panel.example.com，"
+        echo "  没有的话填 http://公网IP:$port 即可。"
+        while :; do
+            base_url="$(normalize_url "$(ask '  面板对外地址' "$default_base")")"
+            case "$base_url" in
+                *0.0.0.0*|*127.0.0.1*|*localhost*)
+                    warn "「$base_url」只有本机能访问，其它 VPS 上的探针连不上，请换成公网 IP 或域名"
+                    continue ;;
+                http://*|https://*) ;;
+                *) warn "地址不合法，请重填"; continue ;;
+            esac
+            break
+        done
+        ok "面板对外地址：$base_url"
 
         umask 077
         cat > "$PANEL_ENV" <<EOF
@@ -342,10 +434,13 @@ agent_install() {
             echo
             echo "  这两项在面板上「节点管理 → 安装」里能看到。"
             echo
-            [ -z "$server" ] && server="$(ask '  面板地址（如 wss://panel.example.com）')"
+            [ -z "$server" ] && server="$(ask '  面板地址（如 https://panel.example.com 或 http://1.2.3.4:8080）')"
             [ -z "$secret" ] && secret="$(ask '  节点密钥')"
         fi
         [ -n "$server" ] || die "面板地址不能为空"
+        # 补全协议。少了它探针只能靠猜，猜错就是
+        # "server gave HTTP response to HTTPS client"。
+        server="$(normalize_url "$server")"
         [ -n "$secret" ] || die "节点密钥不能为空"
 
         umask 077
@@ -450,6 +545,18 @@ svc_logs() {
     journalctl -u "$svc" -n 100 -f --no-pager
 }
 
+# agents_state_text 报告探针二进制是否就位。
+# 缺了的话节点端一键安装会 404，值得在菜单上直接看到。
+agents_state_text() {
+    local n
+    n="$(ls "$PANEL_DATA/agents"/vps-agent-linux-* 2>/dev/null | wc -l)"
+    if [ "$n" -gt 0 ]; then
+        printf "%b已就绪 %s 个架构%b" "$C_GRN" "$n" "$C_END"
+    else
+        printf "%b缺失（选 9 下载）%b" "$C_RED" "$C_END"
+    fi
+}
+
 svc_state_text() {
     local svc="$1"
     if ! svc_exists "$svc"; then
@@ -505,7 +612,7 @@ menu_panel() {
         clear 2>/dev/null || true
         cat <<EOF
 
-$(printf "%b" "$C_BLD")  面板端管理$(printf "%b" "$C_END")   当前状态：$(svc_state_text "$PANEL_SERVICE")
+$(printf "%b" "$C_BLD")  面板端管理$(printf "%b" "$C_END")   当前状态：$(svc_state_text "$PANEL_SERVICE")   探针二进制：$(agents_state_text)
 
     1) 安装 / 升级
     2) 启动
@@ -515,7 +622,8 @@ $(printf "%b" "$C_BLD")  面板端管理$(printf "%b" "$C_END")   当前状态�
     6) 查看日志
     7) 修改配置
     8) 查看初始管理员密码
-    9) 卸载
+    9) 下载 / 更新探针二进制（节点端一键安装用）
+   10) 卸载
 
     0) 返回上级
 
@@ -532,7 +640,8 @@ EOF
                journalctl -u "$PANEL_SERVICE" --no-pager 2>/dev/null \
                    | grep -A6 '面板初始化完成' | sed 's/^/  /' \
                    || warn "没找到。密码只在首次启动时打印，改过密码后这条记录也不再有意义。" ;;
-            9) panel_uninstall ;;
+            9) need_root; download_agents ;;
+            10) panel_uninstall ;;
             0|q|Q) return ;;
             *) warn "无效选项"; sleep 1; continue ;;
         esac
@@ -611,6 +720,7 @@ VPS 流量面板 —— 安装管理脚本
 
 动作：
   install     安装或升级
+  agents      下载/更新探针二进制（仅面板端；节点一键安装依赖它）
   start       启动
   stop        停止
   restart     重启
@@ -655,6 +765,7 @@ main() {
         panel)
             case "$action" in
                 install)   panel_install ;;
+                agents)    need_root; download_agents ;;
                 start)     svc_start   "$PANEL_SERVICE" "面板" ;;
                 stop)      svc_stop    "$PANEL_SERVICE" "面板" ;;
                 restart)   svc_restart "$PANEL_SERVICE" "面板" ;;

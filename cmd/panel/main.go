@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,7 +54,7 @@ func main() {
 	}
 }
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 func newLogger(level string) *slog.Logger {
 	var lv slog.Level
@@ -89,6 +90,10 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	if baseURL != "" {
 		cfg.BaseURL = baseURL
 	}
+	// 命令行覆盖发生在 config.Load 之后，得再归一化一次，
+	// 否则 --base-url 1.2.3.4:8080 这种写法会带着"没有协议"的地址
+	// 一路传到探针那边，逼探针去猜。
+	cfg.BaseURL = config.NormalizeBaseURL(cfg.BaseURL)
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("创建数据目录 %s: %w", cfg.DataDir, err)
@@ -144,6 +149,19 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	go eng.Run(ctx)
 
 	printBanner(log, cfg.Listen, cfg.DataDir, initialPassword)
+
+	// 探针二进制缺失时，面板照常跑，但节点上的一键安装命令会 404。
+	// 这个失败发生在另一台机器上，不在这里说一声用户很难联想到。
+	if missing := srv.MissingAgentBinaries(); len(missing) > 0 {
+		log.Warn("缺少探针二进制，节点端一键安装会失败",
+			"缺失架构", strings.Join(missing, ", "),
+			"存放目录", cfg.AgentsDir(),
+			"补救", "在面板机器上执行 sudo bash install.sh panel agents")
+	}
+	if cfg.BaseURL == "" {
+		log.Warn("没有配置 base_url，安装命令里的面板地址只能按请求头猜。" +
+			"建议设置 PANEL_BASE_URL 或配置文件里的 base_url")
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

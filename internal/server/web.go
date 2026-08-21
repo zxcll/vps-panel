@@ -82,7 +82,20 @@ func cleanPath(p string) string {
 // 二进制放在数据目录下的 agents/ 里，由 make build 产出。
 // 不内嵌进面板：两个架构加起来十几 MB，而且升级探针不该被迫重编面板。
 func (s *Server) agentBinaryPath(arch string) string {
-	return filepath.Join(s.cfg.DataDir, "agents", "vps-agent-linux-"+arch)
+	return filepath.Join(s.cfg.AgentsDir(), "vps-agent-linux-"+arch)
+}
+
+// MissingAgentBinaries 返回缺失的架构列表，面板启动时用它提醒用户。
+// 少了这些文件，节点上的一键安装命令会直接失败，但面板本身跑得好好的，
+// 不主动说一声用户要等到装节点时才发现。
+func (s *Server) MissingAgentBinaries() []string {
+	var missing []string
+	for _, arch := range []string{"amd64", "arm64", "arm", "386"} {
+		if _, err := os.Stat(s.agentBinaryPath(arch)); err != nil {
+			missing = append(missing, arch)
+		}
+	}
+	return missing
 }
 
 var supportedArch = map[string]bool{
@@ -109,7 +122,12 @@ func (s *Server) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log.Error("探针二进制缺失", "path", p, "err", err)
 		writeError(w, http.StatusNotFound, fmt.Sprintf(
-			"面板上找不到 %s 架构的探针二进制（%s）。请在面板机器上执行 make agents 生成后重试", arch, p))
+			"面板上没有 %s 架构的探针二进制。\n"+
+				"在面板机器上执行下面任一条补上：\n"+
+				"  sudo bash install.sh panel agents     # 从 GitHub 下载\n"+
+				"  make agents                            # 从源码编译\n"+
+				"或手动把 vps-agent-linux-%s 放到 %s",
+			arch, arch, s.cfg.AgentsDir()))
 		return
 	}
 	defer f.Close()
