@@ -228,15 +228,28 @@ func TestReconcileReplacesListenerWhenHopChanges(t *testing.T) {
 
 func TestReconcileRollsBackOnBindFailure(t *testing.T) {
 	upIP, upPort := startEchoServer(t)
-	goodPort := freePort(t)
 
-	// 先占住一个端口，让后面绑它的规则必然失败。
+	// 两个端口必须同时申请：先 freePort 拿一个再另外绑一个的话，
+	// 内核可能把刚放掉的那个端口原样发回来，两个端口撞成同一个，
+	// 这个用例就会以一个看不懂的理由偶发失败。
+	// 同时持有两个监听时内核保证端口不同，然后放掉其中一个当作空闲端口。
+	freeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("申请端口失败: %v", err)
+	}
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("占端口失败: %v", err)
+		freeLn.Close()
+		t.Fatalf("申请端口失败: %v", err)
 	}
 	defer blocker.Close()
+
+	goodPort := freeLn.Addr().(*net.TCPAddr).Port
 	takenPort := blocker.Addr().(*net.TCPAddr).Port
+	freeLn.Close() // 从这一刻起 goodPort 空闲，takenPort 仍被占着
+	if goodPort == takenPort {
+		t.Fatalf("两次申请拿到了同一个端口 %d，用例前提不成立", goodPort)
+	}
 
 	b := newUserspaceBackend(0)
 	t.Cleanup(b.Close)
