@@ -414,7 +414,7 @@ export const NodesView = {
             <div class="page-head">
                 <div>
                     <h1>节点管理</h1>
-                    <p>配置流量配额、清零周期、超额动作和 SSH 关机凭据</p>
+                    <p>添加要监控的机器，设置流量配额、每月清零日，以及流量跑满后怎么处理</p>
                 </div>
                 <div class="btn-row">
                     <button class="btn" @click="load()">刷新</button>

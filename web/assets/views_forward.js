@@ -541,7 +541,8 @@ export const ForwardView = {
             <div class="page-head">
                 <div>
                     <h1>转发规则</h1>
-                    <p>把入口机器的端口转到目标，中间可以串多台机器。规则改动会自动下发到相关节点。</p>
+                    <p>把一台机器的端口转发到另一个地址。中间可以再串几台机器做中转，
+                       改完自动下发，不用登录节点手动操作。</p>
                 </div>
                 <div class="btn-row">
                     <button class="btn" @click="load()">刷新</button>
@@ -553,9 +554,10 @@ export const ForwardView = {
             </div>
 
             <div class="notice" style="margin-bottom:16px">
-                转发流量在中转机的网卡上要<b>进出各走一遍</b>，所以节点账本里它是按两份算的
-                （双向计费口径下）。下表的「占用配额」列已经做过换算，可以直接和节点的计费流量对上。
-                当前所有规则合计占用 <b>{{ fmtBytes(totalShare) }}</b>。
+                一份流量经过中转机时要<b>进来一次、再出去一次</b>，所以它实际消耗的机器流量
+                是转发量的两倍（按「双向计费」的节点）。下表已经替你算好，
+                <b>「实际消耗流量」</b>可以直接和节点用量对上。
+                当前所有规则合计消耗 <b>{{ fmtBytes(totalShare) }}</b>。
             </div>
 
             <div class="card">
@@ -572,8 +574,10 @@ export const ForwardView = {
                                 <th>规则</th>
                                 <th>入口地址</th>
                                 <th>链路</th>
-                                <th style="width:150px">本周期流量</th>
-                                <th style="width:130px">占用配额</th>
+                                <th style="width:150px">转发流量</th>
+                                <th style="width:150px" title="这条规则实际消耗掉的机器流量。中转要进出各一次，所以通常是转发流量的两倍">
+                                    实际消耗流量
+                                </th>
                                 <th style="width:210px">操作</th>
                             </tr>
                         </thead>

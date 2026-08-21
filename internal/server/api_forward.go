@@ -34,9 +34,9 @@ type forwardHopView struct {
 	NodeOnline bool   `json:"node_online"`
 	UpBytes    int64  `json:"up_bytes"`
 	DownBytes  int64  `json:"down_bytes"`
-	// NodeShare 是这一跳占用了所在节点多少**计费**流量。
-	// 中转流量在网卡上进出各走一遍，所以双向计费口径下是 (up+down) 的两倍。
-	// 有了它，用户才能把「规则用了 50G」和「节点计费 100G」对上号。
+	// NodeShare 是这一跳**实际消耗掉**的机器流量（界面上就叫这个名字）。
+	// 一份流量经过中转机要进来一次再出去一次，所以双向计费口径下是 (up+down) 的两倍。
+	// 有了它，用户才能把「规则转了 50G」和「机器用了 100G」对上号。
 	NodeShare int64 `json:"node_share"`
 	// Target 是这一跳实际转去哪，展示用。
 	Target string `json:"target"`
@@ -597,8 +597,8 @@ func (s *Server) forwardViews(ctx context.Context) ([]*forwardRuleView, error) {
 	return out, nil
 }
 
-// forwardShareByNode 汇总每个节点上所有转发跳占用的计费流量。
-// 节点详情页用它把「总用量」拆成「转发占用」和「本机自用」。
+// forwardShareByNode 汇总每个节点上所有转发跳实际消耗掉的机器流量。
+// 节点详情页用它把「本周期用量」拆成「转发消耗的」和「机器自己用掉的」。
 func (s *Server) forwardShareByNode(ctx context.Context, nodes map[int64]*store.Node) (map[int64]int64, error) {
 	usage, err := s.st.AllForwardUsage(ctx)
 	if err != nil {

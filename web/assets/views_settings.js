@@ -82,7 +82,7 @@ export const SettingsView = {
             <div class="page-head">
                 <div>
                     <h1>设置</h1>
-                    <p>健康判定、切换防抖、通知渠道和登录凭据</p>
+                    <p>多久算掉线、切换的防抖参数、通知渠道，以及登录密码</p>
                 </div>
             </div>
 
@@ -244,7 +244,7 @@ export const EventsView = {
             <div class="page-head">
                 <div>
                     <h1>事件日志</h1>
-                    <p>上下线、流量预警、关机动作、域名切换、周期清零都会记在这里</p>
+                    <p>节点上下线、流量预警、关机、域名切换、转发下发，都记在这里</p>
                 </div>
                 <div class="btn-row">
                     <div class="seg">

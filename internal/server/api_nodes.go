@@ -29,11 +29,11 @@ type nodeView struct {
 	BillingModeLabel string `json:"billing_mode_label"`
 	ActionLabel      string `json:"action_label"`
 
-	// ForwardShare 是本节点计费流量里有多少来自端口转发。
+	// ForwardShare 是本节点这一周期的用量里，有多少是端口转发消耗掉的。
 	//
 	// 它是从转发计数**换算**出来的估算值，不是从账本里拆出来的：
 	// QuotaStatus.Billed 永远以网卡计数器为准（转发流量本来就已经算在里面了），
-	// 这个字段只是帮用户解释「为什么规则加起来 50G，节点却计了 100G」。
+	// 这个字段只是帮用户解释「为什么规则加起来才 50G，机器却用了 100G」。
 	// 换算口径见 quota.ForwardShare。
 	ForwardShare int64 `json:"forward_share"`
 }

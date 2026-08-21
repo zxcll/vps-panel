@@ -451,7 +451,7 @@ export const DNSView = {
             <div class="page-head">
                 <div>
                     <h1>域名切换</h1>
-                    <p>节点流量耗尽或离线时，把域名解析自动切到备用节点</p>
+                    <p>主力机器流量跑满或者掉线时，自动把域名解析切到备用机器上</p>
                 </div>
                 <div class="btn-row">
                     <button class="btn" @click="showPlan">切换演练</button>

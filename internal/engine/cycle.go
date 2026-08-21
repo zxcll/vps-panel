@@ -95,7 +95,7 @@ func (e *Engine) RollCycle(ctx context.Context, n *store.Node, reason string) er
 		return fmt.Errorf("清零用量: %w", err)
 	}
 	// 转发分账的周期要跟着节点账本一起翻页，否则面板上会出现
-	// 「本周期节点用了 1G，但其中转发占用 500G」这种对不上的数字。
+	// 「本周期机器用了 1G，但其中转发消耗 500G」这种对不上的数字。
 	e.resetForwardUsage(ctx, n, start)
 	// clearHandled=true：清掉超额/预警去重标记，新周期重新开始判定
 	if err := e.st.SetNodeCycle(ctx, n.ID, start, end, true); err != nil {

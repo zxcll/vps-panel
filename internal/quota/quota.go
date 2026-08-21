@@ -42,7 +42,7 @@ func Billed(rx, tx int64, mode string, ratio float64) int64 {
 	return b
 }
 
-// ForwardShare 换算一条转发规则在它所在节点上**占用了多少计费流量**。
+// ForwardShare 换算一条转发规则**实际消耗掉多少机器流量**（界面上叫「实际消耗流量」）。
 //
 // 为什么需要这个换算：转发计数是按 conntrack 方向统计的，上行 up、下行 down；
 // 而节点账本统计的是网卡字节。中转流量在网卡上要进出各走一遍 ——
@@ -53,7 +53,7 @@ func Billed(rx, tx int64, mode string, ratio float64) int64 {
 //	max（单向取大）：max(up+down, up+down) = up+down
 //	out / in：       up+down
 //
-// 有了它，面板才能把「这条规则用了 50G」和「这个节点计费 100G」对上号，
+// 有了它，面板才能把「这条规则转了 50G」和「这台机器用了 100G」对上号，
 // 否则用户会以为账算错了。
 //
 // 注意这个函数只用于展示。转发流量**已经**通过网卡计数器计入配额了，
