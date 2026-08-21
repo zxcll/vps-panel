@@ -67,8 +67,11 @@ type agentConn struct {
 
 	mu      sync.Mutex
 	pending map[string]chan *protocol.CommandResult
-	closed  bool
-	done    chan struct{}
+	// pendingApply 和 pending 分开：转发规则集用 Rev 对号，
+	// 回执类型也不一样，混在一个 map 里只会逼出一堆类型断言。
+	pendingApply map[string]chan *protocol.ApplyAck
+	closed       bool
+	done         chan struct{}
 }
 
 // register 挂上新连接。同一个节点重连时踢掉旧连接。
@@ -254,6 +257,81 @@ func (h *Hub) Send(ctx context.Context, nodeID int64, cmd protocol.Command) (*pr
 		return nil, ErrAgentOffline
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// applyTimeout 是等转发规则回执的上限。
+// 探针那边要拨 DNS、调 nft、绑端口，比执行一条命令慢，但也不该超过这个量级。
+const applyTimeout = 30 * time.Second
+
+// SendRuleset 给某个节点下发一份完整的转发规则集并等回执。
+//
+// 全量覆盖语义：探针收到后让本机状态与之完全一致。所以「撤掉某节点上的所有规则」
+// 就是给它下发一个空集合，不需要单独的删除指令。
+func (h *Hub) SendRuleset(ctx context.Context, nodeID int64, rs protocol.ApplyRuleset) (*protocol.ApplyAck, error) {
+	h.mu.RLock()
+	c := h.conns[nodeID]
+	h.mu.RUnlock()
+
+	if c == nil {
+		return nil, ErrAgentOffline
+	}
+	if rs.Rev == "" {
+		return nil, fmt.Errorf("规则集缺少版本号")
+	}
+
+	ch := make(chan *protocol.ApplyAck, 1)
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrAgentOffline
+	}
+	c.pendingApply[rs.Rev] = ch
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.pendingApply, rs.Rev)
+		c.mu.Unlock()
+	}()
+
+	select {
+	case c.send <- protocol.Frame{Type: protocol.FrameApplyRuleset, ApplyRuleset: &rs}:
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("下发转发规则超时：探针出站队列已满")
+	case <-c.done:
+		return nil, ErrAgentOffline
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	select {
+	case ack := <-ch:
+		return ack, nil
+	case <-time.After(applyTimeout):
+		return nil, fmt.Errorf("等待探针回执超时（%s）", applyTimeout)
+	case <-c.done:
+		return nil, ErrAgentOffline
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// deliverApply 把转发规则回执交给等待中的调用方。
+func (c *agentConn) deliverApply(ack *protocol.ApplyAck) {
+	c.mu.Lock()
+	ch := c.pendingApply[ack.Rev]
+	c.mu.Unlock()
+
+	if ch == nil {
+		// 面板侧已经等超时了，或者探针把旧版本的回执补发了过来。
+		// 记一笔就够，不用当错误处理。
+		c.log.Debug("收到无人等待的转发规则回执", "node_id", c.nodeID, "rev", ack.Rev)
+		return
+	}
+	select {
+	case ch <- ack:
+	default:
 	}
 }
 

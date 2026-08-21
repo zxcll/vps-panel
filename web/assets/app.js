@@ -6,6 +6,7 @@ import { Toasts } from "./components.js";
 import { NodeDetailView, OverviewView } from "./views_overview.js";
 import { NodesView } from "./views_nodes.js";
 import { DNSView } from "./views_dns.js";
+import { ForwardView } from "./views_forward.js";
 import { EventsView, SettingsView } from "./views_settings.js";
 
 const LoginView = {
@@ -60,6 +61,7 @@ const LoginView = {
 const NAV = [
     { key: "overview", label: "总览", icon: "▤" },
     { key: "nodes", label: "节点管理", icon: "▦" },
+    { key: "forward", label: "转发规则", icon: "⇉" },
     { key: "dns", label: "域名切换", icon: "⇄" },
     { key: "events", label: "事件日志", icon: "☰" },
     { key: "settings", label: "设置", icon: "⚙" },
@@ -68,7 +70,7 @@ const NAV = [
 const App = {
     components: {
         LoginView, OverviewView, NodesView, NodeDetailView,
-        DNSView, EventsView, SettingsView, Toasts,
+        DNSView, ForwardView, EventsView, SettingsView, Toasts,
     },
     setup() {
         const route = ref(parseHash());
@@ -151,6 +153,7 @@ const App = {
                 <NodesView v-else-if="route.page === 'nodes'" @open-node="go('node', $event)" />
                 <NodeDetailView v-else-if="route.page === 'node'" :key="detailKey" :node-id="route.id"
                                 @back="go('overview')" @edit="go('nodes')" />
+                <ForwardView v-else-if="route.page === 'forward'" />
                 <DNSView v-else-if="route.page === 'dns'" />
                 <EventsView v-else-if="route.page === 'events'" />
                 <SettingsView v-else-if="route.page === 'settings'" />

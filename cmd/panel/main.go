@@ -147,6 +147,9 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	}
 
 	go eng.Run(ctx)
+	// 转发规则的对账循环。改规则时会立刻下发一次，这个循环只负责
+	// 把当时离线或下发失败的节点补上。
+	go srv.RunForwardSync(ctx)
 
 	printBanner(log, cfg.Listen, cfg.DataDir, initialPassword)
 

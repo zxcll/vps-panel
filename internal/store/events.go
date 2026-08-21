@@ -18,6 +18,7 @@ const (
 	EventDNSSwitch     = "dns_switch"
 	EventCycleReset    = "cycle_reset"
 	EventAgentReport   = "agent_report"
+	EventForwardApply  = "forward_apply"
 	EventSystem        = "system"
 )
 

@@ -148,3 +148,50 @@ func TestValidMode(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardShare(t *testing.T) {
+	// 一条规则跑了上行 3G、下行 7G。中转流量在网卡上进出各一遍，
+	// 所以它在节点账本里的体现是 rx += 10G、tx += 10G。
+	const up, down = 3 * gb, 7 * gb
+
+	cases := []struct {
+		name  string
+		mode  string
+		ratio float64
+		want  int64
+	}{
+		// sum 口径下 rx 和 tx 相加，所以是 2 倍。
+		{"双向：进出各算一遍", store.BillingSum, 1, 20 * gb},
+		// 单向口径下进出相等，取大还是 10G。
+		{"单向：进出相等取其一", store.BillingMax, 1, 10 * gb},
+		{"仅出站", store.BillingOut, 1, 10 * gb},
+		{"仅入站", store.BillingIn, 1, 10 * gb},
+		{"未知口径按双向处理", "bogus", 1, 20 * gb},
+		{"倍率跟着乘", store.BillingMax, 1.1, int64(float64(10*gb) * 1.1)},
+		{"倍率为 0 视为不校准", store.BillingMax, 0, 10 * gb},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ForwardShare(up, down, tc.mode, tc.ratio); got != tc.want {
+				t.Errorf("ForwardShare = %d，期望 %d", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("负数按 0 处理", func(t *testing.T) {
+		if got := ForwardShare(-1, -1, store.BillingSum, 1); got != 0 {
+			t.Errorf("ForwardShare = %d，期望 0", got)
+		}
+	})
+}
+
+// ForwardShare 只是展示用的换算，绝不能反过来影响配额判定。
+// 这条用例钉住"quota 包里没有任何路径会把转发流量加进 Billed"。
+func TestForwardShareDoesNotAffectBilled(t *testing.T) {
+	before := Billed(10*gb, 10*gb, store.BillingSum, 1)
+	_ = ForwardShare(5*gb, 5*gb, store.BillingSum, 1)
+	after := Billed(10*gb, 10*gb, store.BillingSum, 1)
+	if before != after {
+		t.Errorf("Billed 的结果不该被 ForwardShare 影响：%d → %d", before, after)
+	}
+}

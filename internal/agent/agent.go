@@ -23,6 +23,7 @@ import (
 
 	"github.com/zxcll/vps-panel/internal/agent/collector"
 	"github.com/zxcll/vps-panel/internal/protocol"
+	"github.com/zxcll/vps-panel/internal/tc"
 )
 
 // Version 是探针版本，上报给面板用于提示升级。
@@ -47,6 +48,17 @@ type Config struct {
 	// AllowExec 决定是否接受面板下发的自定义命令。
 	// 关掉它就只允许关机指令，适合不完全信任面板的场景。
 	AllowExec bool
+
+	// AllowForward 决定是否接受面板下发的端口转发规则。
+	// 转发本质上是让面板远程改本机的防火墙，权限比执行命令还大，
+	// 所以单独给一个开关，不复用 AllowExec。
+	AllowForward bool
+
+	// ForwardState 是转发状态文件路径。探针重启后靠它恢复规则、接上计数。
+	ForwardState string
+
+	// ForwardPoolSize 是用户态转发每个端口的预连接数，0 表示不预连接。
+	ForwardPoolSize int
 
 	// FakeTraffic 是调试用的伪造流量速率（如 "50MB/s"）。
 	// 本地端到端测试时不用真的跑满带宽就能验证配额和切换逻辑。
@@ -84,6 +96,10 @@ type Agent struct {
 
 	// flush 用来在关机前触发一次立即上报
 	flush chan struct{}
+
+	// fwd 管理端口转发。没开 --allow-forward 时为 nil，
+	// 所有调用点都要判空——探针的核心职责是上报流量，转发是可选件。
+	fwd *forwarder
 }
 
 func New(cfg Config) (*Agent, error) {
@@ -128,7 +144,26 @@ func New(cfg Config) (*Agent, error) {
 		a.log.Warn("已启用伪造流量模式，上报的不是真实网卡数据", "rate", cfg.FakeTraffic)
 	}
 
+	if cfg.AllowForward {
+		a.fwd = newForwarder(forwarderConfig{
+			StatePath: cfg.ForwardState,
+			Iface:     shapingIface(cfg.Iface),
+			PoolSize:  cfg.ForwardPoolSize,
+			Log:       cfg.Log,
+		})
+	}
+
 	return a, nil
+}
+
+// shapingIface 挑限速要挂的网卡。
+// 用户显式指定了就用他指定的；否则找默认路由所在的网卡 ——
+// 限速是挂在出方向上的，挂错网卡就完全不生效。
+func shapingIface(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return tc.DefaultIface()
 }
 
 // --- 地址推导 ---
@@ -275,7 +310,17 @@ func (a *Agent) buildReport(final bool) (protocol.Report, error) {
 		AgentVersion: Version,
 		ProtoVersion: protocol.Version,
 		Final:        final,
+		Forwards:     a.forwardSamples(),
 	}, nil
+}
+
+// forwardSamples 取一次转发计数。没开转发时返回 nil，
+// 面板对空字段的处理和对老探针一样，什么都不做。
+func (a *Agent) forwardSamples() []protocol.ForwardSample {
+	if a.fwd == nil {
+		return nil
+	}
+	return a.fwd.Samples()
 }
 
 // TriggerFlush 请求立刻上报一次。关机前调用，尽量把最后一段流量补上。
@@ -301,6 +346,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	} else {
 		a.log.Info("流量统计口径已确定",
 			"网卡", s.Iface, "当前累计入站", s.Rx, "当前累计出站", s.Tx, "boot_id", s.BootID)
+	}
+
+	// 转发要在连上面板之前就恢复起来：探针重启期间内核里的规则其实还在转发，
+	// 但用户态监听器是随进程没的，早一秒恢复就少一秒不通。
+	if a.fwd != nil {
+		a.fwd.Start(ctx)
+		defer a.fwd.Close()
 	}
 
 	backoff := time.Second
@@ -585,6 +637,22 @@ func (a *Agent) wsReadLoop(ctx context.Context, ws *websocket.Conn, out chan pro
 			default:
 			}
 
+		case protocol.FrameApplyRuleset:
+			if f.ApplyRuleset == nil {
+				continue
+			}
+			rs := *f.ApplyRuleset
+			// 和执行指令一样单开 goroutine：落规则要拨 DNS、调 nft、绑端口，
+			// 全在读循环里做会把心跳和后续指令一起堵住。
+			go func() {
+				ack := a.applyRuleset(ctx, rs)
+				select {
+				case out <- protocol.Frame{Type: protocol.FrameApplyAck, ApplyAck: &ack}:
+				case <-time.After(10 * time.Second):
+					a.log.Warn("转发规则回执发送超时", "rev", rs.Rev)
+				}
+			}()
+
 		case protocol.FrameCommand:
 			if f.Command == nil {
 				continue
@@ -602,6 +670,21 @@ func (a *Agent) wsReadLoop(ctx context.Context, ws *websocket.Conn, out chan pro
 			}()
 		}
 	}
+}
+
+// applyRuleset 落地面板下发的转发规则集。
+func (a *Agent) applyRuleset(ctx context.Context, rs protocol.ApplyRuleset) protocol.ApplyAck {
+	if a.fwd == nil {
+		return protocol.ApplyAck{
+			Rev:   rs.Rev,
+			Error: "该探针启动时禁用了端口转发（--allow-forward=false）",
+		}
+	}
+	ack := a.fwd.Apply(ctx, rs)
+	if ack.Error != "" {
+		a.log.Error("转发规则下发失败", "rev", rs.Rev, "错误", ack.Error)
+	}
+	return ack
 }
 
 // --- 伪造流量（调试用）---

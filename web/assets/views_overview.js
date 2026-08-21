@@ -263,6 +263,17 @@ export const NodeDetailView = {
                           :sub="fmtTime(node.cycle_end) + ' 清零'" />
             </div>
 
+            <!-- 转发占用只在这台机器真的在转发时才显示，别给没用转发的用户增加噪音。 -->
+            <div v-if="node.forward_share > 0" class="notice" style="margin-bottom:16px">
+                本周期的 {{ fmtBytes(node.quota_status.billed_bytes) }} 计费流量里，约
+                <b>{{ fmtBytes(node.forward_share) }}</b> 来自端口转发，
+                其余 <b>{{ fmtBytes(Math.max(0, node.quota_status.billed_bytes - node.forward_share)) }}</b>
+                是本机自己产生的。
+                <span class="muted">
+                    中转流量在网卡上进出各走一遍，所以这个数字是转发规则计数的两倍（双向计费口径下）。
+                </span>
+            </div>
+
             <div class="card">
                 <div class="card-title">
                     <span>流量曲线</span>

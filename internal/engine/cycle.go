@@ -30,6 +30,7 @@ func (e *Engine) rollCycleIfDue(ctx context.Context, n *store.Node) error {
 		if err := e.st.ResetUsage(ctx, n.ID, start); err != nil {
 			return err
 		}
+		e.resetForwardUsage(ctx, n, start)
 		n.CycleStart, n.CycleEnd = start, end
 		return nil
 	}
@@ -93,6 +94,9 @@ func (e *Engine) RollCycle(ctx context.Context, n *store.Node, reason string) er
 	if err := e.st.ResetUsage(ctx, n.ID, start); err != nil {
 		return fmt.Errorf("清零用量: %w", err)
 	}
+	// 转发分账的周期要跟着节点账本一起翻页，否则面板上会出现
+	// 「本周期节点用了 1G，但其中转发占用 500G」这种对不上的数字。
+	e.resetForwardUsage(ctx, n, start)
 	// clearHandled=true：清掉超额/预警去重标记，新周期重新开始判定
 	if err := e.st.SetNodeCycle(ctx, n.ID, start, end, true); err != nil {
 		return fmt.Errorf("写入新周期边界: %w", err)
@@ -159,9 +163,25 @@ func (e *Engine) pruneIfDue(ctx context.Context, cfg store.Settings) {
 		e.log.Info("已清理过期流量曲线", "rows", n, "before", cutoff.Format("2006-01-02"))
 	}
 
+	if n, err := e.st.PruneForwardHourly(ctx, cutoff); err != nil {
+		e.log.Warn("清理历史转发曲线失败", "err", err)
+	} else if n > 0 {
+		e.log.Info("已清理过期转发曲线", "rows", n, "before", cutoff.Format("2006-01-02"))
+	}
+
 	if n, err := e.st.PruneEvents(ctx, 20000); err != nil {
 		e.log.Warn("清理历史事件失败", "err", err)
 	} else if n > 0 {
 		e.log.Info("已清理过期事件", "rows", n)
+	}
+}
+
+// resetForwardUsage 把节点上所有转发跳的分账清零。
+//
+// 失败只记日志不往上抛：转发分账纯粹是展示用的，
+// 绝不能因为它让节点账本的周期翻页失败 —— 那才是有副作用的那条路径。
+func (e *Engine) resetForwardUsage(ctx context.Context, n *store.Node, start time.Time) {
+	if err := e.st.ResetForwardUsageOfNode(ctx, n.ID, start); err != nil {
+		e.log.Warn("清零转发分账失败", "node", n.Name, "err", err)
 	}
 }

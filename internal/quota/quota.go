@@ -42,6 +42,40 @@ func Billed(rx, tx int64, mode string, ratio float64) int64 {
 	return b
 }
 
+// ForwardShare 换算一条转发规则在它所在节点上**占用了多少计费流量**。
+//
+// 为什么需要这个换算：转发计数是按 conntrack 方向统计的，上行 up、下行 down；
+// 而节点账本统计的是网卡字节。中转流量在网卡上要进出各走一遍 ——
+// 客户端发来的 up 字节先入站再出站，目标回来的 down 字节也是先入站再出站，
+// 于是网卡上 rx += up+down、tx += up+down。代入各种计费口径就得到：
+//
+//	sum（双向相加）：(up+down) + (up+down) = 2×(up+down)
+//	max（单向取大）：max(up+down, up+down) = up+down
+//	out / in：       up+down
+//
+// 有了它，面板才能把「这条规则用了 50G」和「这个节点计费 100G」对上号，
+// 否则用户会以为账算错了。
+//
+// 注意这个函数只用于展示。转发流量**已经**通过网卡计数器计入配额了，
+// 千万不要把结果再加进 node_usage —— 那才是真正的重复计费。
+func ForwardShare(up, down int64, mode string, ratio float64) int64 {
+	if up < 0 {
+		up = 0
+	}
+	if down < 0 {
+		down = 0
+	}
+	total := up + down
+	if mode == store.BillingSum || !ValidMode(mode) {
+		// 未知口径按 sum 处理，和 Billed 的兜底保持一致。
+		total *= 2
+	}
+	if ratio > 0 && ratio != 1 {
+		total = int64(float64(total) * ratio)
+	}
+	return total
+}
+
 // ValidMode 判断计费口径是否合法。
 func ValidMode(mode string) bool {
 	switch mode {

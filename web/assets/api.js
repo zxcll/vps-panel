@@ -189,6 +189,17 @@ export const EXCEED_ACTIONS = [
     { value: "command", label: "执行自定义命令", hint: "如 systemctl stop xray，停服务但保留 SSH" },
 ];
 
+export const FORWARD_PROTOCOLS = [
+    { value: "tcp", label: "TCP", hint: "最常见。HTTP、SSH、大部分代理协议都是 TCP" },
+    { value: "udp", label: "UDP", hint: "DNS、QUIC、部分游戏和代理协议" },
+    { value: "tcp+udp", label: "TCP + UDP", hint: "同一个端口两种协议都转" },
+];
+
+export const FORWARD_MODES = [
+    { value: "kernel", label: "内核态（零拷贝）", hint: "nftables DNAT，开销最低，TCP/UDP 都支持。默认用它" },
+    { value: "userspace", label: "用户态（分段 TCP）", hint: "每跳单独建连接，避免多跳串联时 TCP 拥塞叠加，还能省掉一次握手往返。只支持 TCP" },
+];
+
 export const PROVIDER_TYPES = [
     { value: "cloudflare", label: "Cloudflare" },
     { value: "dnspod", label: "腾讯云 DNSPod" },

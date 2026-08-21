@@ -37,6 +37,8 @@ type Server struct {
 	notifier   *notify.Notifier
 	log        *slog.Logger
 	trustProxy bool
+	// fwdSync 记着每个节点最近下发成功的转发规则版本，避免无谓重发。
+	fwdSync *forwardSyncer
 }
 
 func New(
@@ -55,6 +57,7 @@ func New(
 		cfg: cfg, st: st, cipher: cipher, hub: hub, ing: ing,
 		exec: exec, fo: fo, eng: eng, notifier: n, log: log,
 		trustProxy: cfg.TrustProxyHeaders,
+		fwdSync:    newForwardSyncer(),
 	}
 }
 
@@ -110,6 +113,19 @@ func (s *Server) Handler() http.Handler {
 	auth("POST /api/dns/records/{id}/switch", s.handleSwitchRecord)
 	auth("POST /api/dns/records/{id}/sync", s.handleSyncRecord)
 	auth("GET /api/dns/plan", s.handleDNSPlan)
+
+	// 转发规则。/api/forwards/sync 和 /api/forwards/{id} 不会打架：
+	// ServeMux 取最具体的匹配，字面量段优先于通配符段。
+	auth("GET /api/forwards", s.handleListForwards)
+	auth("POST /api/forwards", s.handleCreateForward)
+	auth("POST /api/forwards/sync", s.handleSyncForward)
+	auth("GET /api/forwards/nodes", s.handleListForwardNodes)
+	auth("PUT /api/forwards/nodes/{id}", s.handleSaveForwardNode)
+	auth("GET /api/forwards/hops/{id}/traffic", s.handleForwardTraffic)
+	auth("GET /api/forwards/{id}", s.handleGetForward)
+	auth("PUT /api/forwards/{id}", s.handleUpdateForward)
+	auth("DELETE /api/forwards/{id}", s.handleDeleteForward)
+	auth("POST /api/forwards/{id}/toggle", s.handleToggleForward)
 
 	auth("GET /api/events", s.handleListEvents)
 	auth("GET /api/settings", s.handleGetSettings)
@@ -254,6 +270,7 @@ func (s *Server) mustNode(w http.ResponseWriter, r *http.Request) (*store.Node, 
 func actionContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), 90*time.Second)
 }
+
 // atoiDefault 解析整数查询参数，失败时用默认值。
 func atoiDefault(s string, def int) int {
 	if s == "" {

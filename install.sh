@@ -39,6 +39,8 @@ PANEL_SERVICE="vps-panel"
 
 AGENT_BIN="${AGENT_BIN:-/usr/local/bin/vps-agent}"
 AGENT_ENV="${AGENT_ENV:-/etc/vps-agent.env}"
+# 转发状态目录：探针靠它在重启后恢复规则、接上流量计数
+AGENT_STATE_DIR="${AGENT_STATE_DIR:-/var/lib/vps-agent}"
 AGENT_SERVICE="vps-agent"
 
 SYSTEMD_DIR="/etc/systemd/system"
@@ -382,6 +384,43 @@ panel_uninstall() {
 # 节点端（探针）
 # ============================================================================
 
+# agent_forward_deps 装端口转发需要的系统工具。
+#
+# 缺了它们探针照样跑（流量监控不受影响），只是转发规则下发时会失败，
+# 所以这里全程尽力而为，装不上只提醒不中断安装。
+agent_forward_deps() {
+    local missing=""
+    command -v nft >/dev/null 2>&1 || missing="$missing nftables"
+    command -v tc  >/dev/null 2>&1 || missing="$missing iproute2"
+    [ -z "$missing" ] && return 0
+
+    info "安装端口转发依赖：$missing"
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        dnf install -y -q $missing >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        yum install -y -q $missing >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        apk add --no-cache $missing >/dev/null 2>&1 || true
+    fi
+
+    # 精简镜像上模块常常在盘里但没自动加载，装完补一下。
+    command -v nft >/dev/null 2>&1 && modprobe nf_tables >/dev/null 2>&1 || true
+
+    if command -v nft >/dev/null 2>&1 && command -v tc >/dev/null 2>&1; then
+        ok "端口转发依赖已就绪"
+    else
+        warn "端口转发依赖没装全（缺$missing），流量监控不受影响；"
+        warn "要用转发功能的话请手动安装后重启 $AGENT_SERVICE。"
+    fi
+}
+
 agent_write_unit() {
     cat > "$SYSTEMD_DIR/$AGENT_SERVICE.service" <<EOF
 [Unit]
@@ -453,6 +492,9 @@ agent_install() {
             echo "VPS_AGENT_INTERVAL=30s"
             echo "# 是否允许面板下发自定义命令。设为 false 则只接受关机指令。"
             echo "VPS_AGENT_ALLOW_EXEC=true"
+            echo "# 是否允许面板下发端口转发规则。转发会改本机防火墙，"
+            echo "# 不用这个功能的话建议设为 false。"
+            echo "VPS_AGENT_ALLOW_FORWARD=true"
         } > "$AGENT_ENV"
         chmod 600 "$AGENT_ENV"
         ok "配置已写入 $AGENT_ENV"
@@ -486,6 +528,9 @@ agent_install() {
     fi
     [ "$from_panel" = 0 ] && { download_binary agent "$arch" "$AGENT_BIN" || return 1; }
 
+    agent_forward_deps
+    mkdir -p "$AGENT_STATE_DIR" && chmod 750 "$AGENT_STATE_DIR"
+
     agent_write_unit
     systemctl daemon-reload
     systemctl enable "$AGENT_SERVICE" >/dev/null 2>&1
@@ -515,6 +560,14 @@ agent_uninstall() {
     rm -f "$SYSTEMD_DIR/$AGENT_SERVICE.service"
     systemctl daemon-reload
     rm -f "$AGENT_BIN" "$AGENT_ENV"
+    rm -rf "$AGENT_STATE_DIR"
+
+    # 探针正常退出时会自己清掉转发规则，但如果它上次是被 kill -9 的，
+    # 规则还留在内核里。这里兜一手，免得卸载完还在转发。
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet vps_forward >/dev/null 2>&1 || true
+    fi
+
     ok "探针已完全移除"
     echo
     info "该节点的流量账本还留在面板上，需要的话去面板里手动删除节点。"

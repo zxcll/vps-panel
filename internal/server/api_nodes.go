@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -27,6 +28,14 @@ type nodeView struct {
 	// BillingModeLabel 等中文标签由后端给，前端不用维护第二份枚举映射。
 	BillingModeLabel string `json:"billing_mode_label"`
 	ActionLabel      string `json:"action_label"`
+
+	// ForwardShare 是本节点计费流量里有多少来自端口转发。
+	//
+	// 它是从转发计数**换算**出来的估算值，不是从账本里拆出来的：
+	// QuotaStatus.Billed 永远以网卡计数器为准（转发流量本来就已经算在里面了），
+	// 这个字段只是帮用户解释「为什么规则加起来 50G，节点却计了 100G」。
+	// 换算口径见 quota.ForwardShare。
+	ForwardShare int64 `json:"forward_share"`
 }
 
 func (s *Server) viewNode(n *store.Node, u *store.Usage, live *Live) *nodeView {
@@ -88,13 +97,16 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	lives := s.hub.AllLive()
 
 	out := make([]*nodeView, 0, len(nodes))
+	byID := make(map[int64]*store.Node, len(nodes))
 	for _, n := range nodes {
+		byID[n.ID] = n
 		u := usages[n.ID]
 		if u == nil {
 			u = &store.Usage{NodeID: n.ID}
 		}
 		out = append(out, s.viewNode(n, u, lives[n.ID]))
 	}
+	s.attachForwardShare(ctx, byID, out)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -103,12 +115,29 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	u, err := s.st.GetUsage(r.Context(), n.ID)
+	ctx := r.Context()
+	u, err := s.st.GetUsage(ctx, n.ID)
 	if err != nil {
 		handleStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.viewNode(n, u, s.hub.LiveOf(n.ID)))
+	v := s.viewNode(n, u, s.hub.LiveOf(n.ID))
+	s.attachForwardShare(ctx, map[int64]*store.Node{n.ID: n}, []*nodeView{v})
+	writeJSON(w, http.StatusOK, v)
+}
+
+// attachForwardShare 给节点视图补上「其中多少来自转发」。
+//
+// 查询失败只记日志不报错：这只是个辅助说明，不该让整个节点列表打不开。
+func (s *Server) attachForwardShare(ctx context.Context, nodes map[int64]*store.Node, views []*nodeView) {
+	share, err := s.forwardShareByNode(ctx, nodes)
+	if err != nil {
+		s.log.Debug("统计转发流量占用失败", "err", err)
+		return
+	}
+	for _, v := range views {
+		v.ForwardShare = share[v.ID]
+	}
 }
 
 // nodeRequest 是新建/编辑节点的请求体。

@@ -128,6 +128,14 @@ func (i *Ingestor) Apply(ctx context.Context, node *store.Node, r protocol.Repor
 			}
 		}
 
+		// 转发计数走另一套表，只做分账展示，不影响上面的账本和配额判定。
+		// 放在同一个事务里是为了一次上报只开一个写事务。
+		if len(r.Forwards) > 0 {
+			if err := applyForward(ctx, tx, node, r.Forwards, now); err != nil {
+				return err
+			}
+		}
+
 		return tx.TouchNode(ctx, node.ID, now)
 	})
 	if err != nil {

@@ -139,12 +139,13 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(64 * 1024)
 
 	conn := &agentConn{
-		nodeID:  node.ID,
-		ws:      ws,
-		log:     s.log,
-		send:    make(chan protocol.Frame, 16),
-		pending: map[string]chan *protocol.CommandResult{},
-		done:    make(chan struct{}),
+		nodeID:       node.ID,
+		ws:           ws,
+		log:          s.log,
+		send:         make(chan protocol.Frame, 16),
+		pending:      map[string]chan *protocol.CommandResult{},
+		pendingApply: map[string]chan *protocol.ApplyAck{},
+		done:         make(chan struct{}),
 	}
 
 	s.hub.register(conn)
@@ -155,6 +156,10 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	go conn.writeLoop(ctx)
+
+	// 探针一连上就把它该有的转发规则推一遍。
+	// 探针重装、状态文件丢失、面板在它离线期间改过规则，都靠这一下补齐。
+	go s.pushRulesetOnConnect(ctx, node.ID, node.Name)
 
 	defer func() {
 		s.hub.unregister(conn)
@@ -208,6 +213,11 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		case protocol.FrameResult:
 			if f.Result != nil {
 				conn.deliver(f.Result)
+			}
+
+		case protocol.FrameApplyAck:
+			if f.ApplyAck != nil {
+				conn.deliverApply(f.ApplyAck)
 			}
 
 		case protocol.FramePong:

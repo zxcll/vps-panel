@@ -189,6 +189,97 @@ type DNSMember struct {
 	NodeName string `json:"node_name,omitempty"`
 }
 
+// --- 端口转发 ---
+
+// 转发协议。
+const (
+	ForwardProtoTCP  = "tcp"
+	ForwardProtoUDP  = "udp"
+	ForwardProtoBoth = "tcp+udp"
+)
+
+// 转发模式。
+const (
+	// ForwardModeKernel 是 nftables DNAT，零拷贝，TCP/UDP 全支持。
+	ForwardModeKernel = "kernel"
+	// ForwardModeUserspace 是探针内嵌的 TCP relay：每跳单独建连接，
+	// 规避多跳串联时 TCP-over-TCP 的拥塞叠加，代价是只支持 TCP。
+	ForwardModeUserspace = "userspace"
+)
+
+// ForwardNode 是节点的转发相关配置，和 nodes 表分开存。
+type ForwardNode struct {
+	NodeID int64 `json:"node_id"`
+	// RelayHost 是其他节点访问本节点用的地址。留空时回落 nodes.ipv4。
+	RelayHost   string    `json:"relay_host"`
+	RelayHostV6 string    `json:"relay_host_v6"`
+	PortStart   int       `json:"port_start"`
+	PortEnd     int       `json:"port_end"`
+	Enabled     bool      `json:"enabled"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ForwardRule 是一条逻辑转发规则：从入口一路转到最终目标。
+type ForwardRule struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Proto     string    `json:"proto"`
+	DestHost  string    `json:"dest_host"`
+	DestPort  int       `json:"dest_port"`
+	Enabled   bool      `json:"enabled"`
+	Remark    string    `json:"remark"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// Hops 只在查询时填充，不是数据库列。按 position 升序。
+	Hops []ForwardHop `json:"hops,omitempty"`
+}
+
+// ForwardHop 是规则在某台机器上的一跳。Position 从 0 开始，0 即入口。
+type ForwardHop struct {
+	ID         int64  `json:"id"`
+	RuleID     int64  `json:"rule_id"`
+	Position   int    `json:"position"`
+	NodeID     int64  `json:"node_id"`
+	ListenPort int    `json:"listen_port"`
+	// Proto 是从规则冗余下来的，用于支撑 (node_id, listen_port, proto) 唯一约束。
+	Proto         string `json:"proto"`
+	Mode          string `json:"mode"`
+	BandwidthMbps int    `json:"bandwidth_mbps"`
+
+	// NodeName 只在查询时填充，不是数据库列。
+	NodeName string `json:"node_name,omitempty"`
+}
+
+// ForwardCounter 是探针上报的一跳累计计数快照。
+// Epoch 变化即代表探针侧计数器已归零，作用等同于 Counter 里的 BootID。
+type ForwardCounter struct {
+	HopID     int64
+	Epoch     string
+	LastUp    int64
+	LastDown  int64
+	UpdatedAt time.Time
+}
+
+// ForwardUsage 是一跳在当前账单周期内的累计用量。
+//
+// 注意：这份用量**不参与节点配额判定**。中转流量在网卡上进出各走一遍，
+// 已经被节点账本算进去了，这里只用于分账展示。
+type ForwardUsage struct {
+	HopID      int64     `json:"hop_id"`
+	CycleStart time.Time `json:"cycle_start"`
+	UpBytes    int64     `json:"up_bytes"`
+	DownBytes  int64     `json:"down_bytes"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// ForwardHourlyPoint 是按小时聚合的转发流量增量。
+type ForwardHourlyPoint struct {
+	HourTS    time.Time `json:"hour_ts"`
+	UpDelta   int64     `json:"up_delta"`
+	DownDelta int64     `json:"down_delta"`
+}
+
 // 事件级别。
 const (
 	LevelInfo  = "info"
