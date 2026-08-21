@@ -1,0 +1,30 @@
+services:
+  panel:
+    build: .
+    # 发布后可以直接用镜像：
+    # image: ghcr.io/zxcll/vps-panel:latest
+    container_name: vps-panel
+    restart: unless-stopped
+
+    # 只绑本机。对外访问请在宿主机上用 Nginx / Caddy 反代 + HTTPS。
+    # 确实要直接暴露的话把左边的 127.0.0.1: 去掉。
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      - panel-data:/data
+
+    environment:
+      # 探针访问面板的地址，会写进一键安装命令
+      PANEL_BASE_URL: "https://panel.example.com"
+      # 面板在反代后面，从 X-Forwarded-For 取真实客户端 IP
+      PANEL_TRUST_PROXY: "true"
+      # 加密 SSH / DNS 凭据的主密钥（openssl rand -hex 32）。
+      # 不设则自动生成到卷里的 master.key。
+      # PANEL_MASTER_KEY: ""
+
+    # 面板需要能主动连各节点的 SSH 端口做远程关机，
+    # 也要能拨测端口判断节点是否存活，所以不要限制出站网络。
+
+volumes:
+  panel-data:

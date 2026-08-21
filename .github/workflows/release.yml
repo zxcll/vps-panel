@@ -1,0 +1,79 @@
+# 打 tag 时自动编译并发布二进制。
+#
+# install.sh 就是从这里产出的 Release 资产下载的，
+# 文件名格式必须是 panel-linux-<arch> / agent-linux-<arch>，改名会让安装脚本找不到。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go vet ./...
+      - run: go test ./... -race -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: 交叉编译
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          for arch in amd64 arm64 arm 386; do
+            for cmd in panel agent; do
+              echo "==> $cmd linux/$arch"
+              CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+                go build -trimpath -ldflags "-s -w" \
+                -o "dist/${cmd}-linux-${arch}" "./cmd/${cmd}"
+            done
+          done
+          cp install.sh dist/
+          cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            **面板端**（一台机器装一次）
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh -o install.sh
+            sudo bash install.sh panel install
+            ```
+
+            **节点端**（每台被监控的 VPS）
+
+            在面板上新建节点后，复制页面给出的安装命令执行即可；
+            也可以手动跑：
+            ```bash
+            sudo bash install.sh agent install --server wss://你的面板地址 --secret 节点密钥
+            ```
+
+            不带参数运行 `sudo bash install.sh` 会进入交互菜单，
+            可以启动 / 停止 / 重启 / 查看日志 / 卸载。
+
+            国内机器连不上 GitHub 时加个加速前缀：
+            ```bash
+            GITHUB_PROXY=https://ghfast.top/ sudo bash install.sh agent install
+            ```

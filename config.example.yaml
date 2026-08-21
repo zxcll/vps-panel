@@ -1,0 +1,31 @@
+# 面板配置示例。
+#
+# 这里只放启动期必须知道的东西。运行期可调的参数
+# （离线判定阈值、切换冷却、通知渠道等）在面板的「设置」页面里改，不用重启。
+#
+# 每一项都可以用环境变量覆盖，优先级更高：
+#   PANEL_LISTEN / PANEL_DATA_DIR / PANEL_BASE_URL / PANEL_MASTER_KEY
+
+# 监听地址。
+# 面板保存着各节点的 SSH 凭据，属于高价值目标。
+# 强烈建议只绑 127.0.0.1，前面挂 Nginx 反代 + HTTPS 对外。
+listen: 127.0.0.1:8080
+
+# 数据目录。SQLite 数据库、主密钥、探针二进制都放这里。
+data_dir: ./data
+
+# 探针访问面板用的地址，会写进一键安装命令。
+# 用了 HTTPS 反代就填 https://；探针会自动换成 wss:// 建长连接。
+base_url: https://panel.example.com
+
+# 加密 SSH / DNS 凭据的主密钥，64 位十六进制（32 字节）。
+# 留空则首次启动时自动生成并写入 data_dir/master.key（权限 0600）。
+#
+# 注意：这个密钥丢了，库里所有 SSH 密码和 DNS API 凭据都解不开，只能重新填写。
+# 备份数据库时记得把它一起备份。
+# 生成办法：openssl rand -hex 32
+# master_key: ""
+
+# 面板挂在 Nginx / Caddy 后面时设为 true，
+# 这样日志里记录的是真实客户端 IP 而不是反代的 IP。
+trust_proxy_headers: false
