@@ -181,6 +181,12 @@ type ForwardProbe struct {
 	Firewalls []string `json:"firewalls,omitempty"`
 	// RuleCount 是探针当前实际生效的转发规则条数，用来核对面板下发有没有到位。
 	RuleCount int `json:"rule_count"`
+
+	// RTTMS 是到 ProbeRequest.RTTTarget 的往返时间，也就是**本段**的真实网络延迟。
+	// 0 且 RTTError 为空表示没测（没让测，或者探针版本旧不认识这个字段）。
+	RTTMS int `json:"rtt_ms,omitempty"`
+	// RTTError 说明为什么没量到。量不到不影响连通性结论，只是少一个数字。
+	RTTError string `json:"rtt_error,omitempty"`
 }
 
 type Command struct {
@@ -204,6 +210,16 @@ type ProbeRequest struct {
 	Target string `json:"target"`
 	// ListenPort 是这一跳在本机的监听端口，用来判断用户态转发起没起来。0 表示不检查。
 	ListenPort int `json:"listen_port,omitempty"`
+	// RTTTarget 是「下一跳那台机器自己」的地址，用来单独量本段的真实网络延迟。
+	//
+	// 为什么不能直接用 Target 的耗时：Target 指向的是下一跳的**转发端口**，
+	// 内核态转发在 PREROUTING 就把目标地址改写并转发出去了，下一跳自己的
+	// TCP 栈根本不接这个连接 —— SYN-ACK 是从落地目标回来的。所以拨 Target
+	// 量到的是「本机 → 下一跳 → 落地」的整条往返，不是本段。
+	//
+	// RTTTarget 指向下一跳机器上一个**会在本地终结**的端口（面板填的是它的
+	// 探测端口，默认 SSH 22），这样才量得到点对点的延迟。留空表示不测。
+	RTTTarget string `json:"rtt_target,omitempty"`
 }
 
 type CommandResult struct {

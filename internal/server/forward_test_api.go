@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/zxcll/vps-panel/internal/action"
@@ -41,10 +42,21 @@ type forwardTestLeg struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	// Target 是实际拨的地址。
-	Target    string `json:"target"`
-	OK        bool   `json:"ok"`
-	LatencyMS int    `json:"latency_ms"`
-	Error     string `json:"error,omitempty"`
+	Target string `json:"target"`
+	OK     bool   `json:"ok"`
+	// LatencyMS 是拨通 Target 花的时间。
+	//
+	// 注意它**不等于本段延迟**：Target 是下一跳的转发端口，内核态转发在
+	// PREROUTING 就把目标改写转发走了，下一跳自己不接这个连接，SYN-ACK 是
+	// 从更下游回来的。所以这个数字是「本机 → 下一跳 → …… → 落地」的整条往返，
+	// 越靠前的跳数字越大。判断连通性看它，判断哪一段慢要看 SegmentMS。
+	LatencyMS int `json:"latency_ms"`
+	// SegmentMS 是**本段**的真实网络延迟（本机 → 下一跳那台机器）。
+	// 最后一跳直接拨落地目标，两者相同。0 表示没量到，原因见 SegmentNote。
+	SegmentMS int `json:"segment_ms"`
+	// SegmentNote 在量不到本段延迟时说明原因。
+	SegmentNote string `json:"segment_note,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// Diagnosis 是这台机器的转发能力体检，只在从节点发起的段上有值。
 	Diagnosis *legDiagnosis `json:"diagnosis,omitempty"`
 }
@@ -122,7 +134,11 @@ func (s *Server) testForwardRule(ctx context.Context, rule *store.ForwardRule) (
 			Target:   legTarget(p.Rule),
 		}
 
-		probe, err := s.probeFromNode(ctx, p.NodeID, leg.Target, p.Rule.ListenPort)
+		// 本段延迟要单独量，拨的是下一跳机器上一个会在本地终结的端口。
+		// 最后一跳没有下一跳，它拨的落地目标本来就会终结连接，不用再测。
+		rttTarget := hopRTTTarget(p, nodes, fwdNodes)
+
+		probe, err := s.probeFromNode(ctx, p.NodeID, leg.Target, p.Rule.ListenPort, rttTarget)
 		switch {
 		case err != nil:
 			leg.Error = err.Error()
@@ -131,6 +147,7 @@ func (s *Server) testForwardRule(ctx context.Context, rule *store.ForwardRule) (
 			leg.LatencyMS = probe.LatencyMS
 			leg.Error = probe.Error
 			leg.Diagnosis = diagnose(probe, p.Rule)
+			leg.SegmentMS, leg.SegmentNote = segmentLatency(p, probe, rttTarget)
 		}
 		report.Legs = append(report.Legs, leg)
 	}
@@ -139,8 +156,55 @@ func (s *Server) testForwardRule(ctx context.Context, rule *store.ForwardRule) (
 	return report, nil
 }
 
+// hopRTTTarget 给出「量本段延迟该拨哪里」。
+//
+// 拨的是下一跳机器的**探测端口**（默认 SSH 22），因为它会在那台机器上
+// 本地终结 —— 转发端口不行，内核态 DNAT 在包进协议栈之前就把它转走了。
+//
+// 端口开着关着都无所谓：关着的话对方内核回 RST，往返时间一样准。
+// 唯一测不出来的情况是被防火墙静默丢弃。
+//
+// 最后一跳返回空串：它拨的落地目标本来就会终结连接，LatencyMS 就是本段延迟。
+func hopRTTTarget(p forwardplan.Placed, nodes map[int64]*store.Node,
+	fwdNodes map[int64]*store.ForwardNode) string {
+
+	if p.NextNodeID == 0 {
+		return ""
+	}
+	next := nodes[p.NextNodeID]
+	if next == nil {
+		return ""
+	}
+	host := forwardplan.RelayHost(fwdNodes[p.NextNodeID], next)
+	if host == "" {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(next.EffectiveProbePort()))
+}
+
+// segmentLatency 定出这一段真正的网络延迟，以及量不到时的说明。
+func segmentLatency(p forwardplan.Placed, probe *protocol.ForwardProbe, rttTarget string) (int, string) {
+	// 最后一跳：拨的就是落地目标，它会终结连接，握手耗时即本段延迟。
+	if p.NextNodeID == 0 {
+		return probe.LatencyMS, ""
+	}
+	if rttTarget == "" {
+		return 0, "下一跳没有可用的中继地址，量不了本段延迟"
+	}
+	if probe.RTTError != "" {
+		return 0, fmt.Sprintf("量本段延迟时拨 %s 失败：%s（那个端口多半被防火墙静默丢弃了）",
+			rttTarget, probe.RTTError)
+	}
+	if probe.RTTMS == 0 {
+		// 老探针不认识 rtt_target 这个字段，回执里自然是空的。
+		return 0, "这台机器的探针版本较旧，还不会单独量本段延迟；升级探针后即可显示"
+	}
+	return probe.RTTMS, ""
+}
+
 // probeFromNode 让某个节点拨一次目标地址。
-func (s *Server) probeFromNode(ctx context.Context, nodeID int64, target string, listenPort int) (*protocol.ForwardProbe, error) {
+func (s *Server) probeFromNode(ctx context.Context, nodeID int64, target string,
+	listenPort int, rttTarget string) (*protocol.ForwardProbe, error) {
 	if !s.hub.Online(nodeID) {
 		return nil, fmt.Errorf("探针未连接，无法从这台机器发起测试")
 	}
@@ -149,7 +213,9 @@ func (s *Server) probeFromNode(ctx context.Context, nodeID int64, target string,
 		Cmd:        protocol.CmdForwardTest,
 		TimeoutSec: 15,
 		Reason:     "面板发起的转发链路测试",
-		Probe:      &protocol.ProbeRequest{Target: target, ListenPort: listenPort},
+		Probe: &protocol.ProbeRequest{
+			Target: target, ListenPort: listenPort, RTTTarget: rttTarget,
+		},
 	}
 	res, err := s.hub.Send(ctx, nodeID, cmd)
 	if err != nil {

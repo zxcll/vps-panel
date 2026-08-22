@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/zxcll/vps-panel/internal/forward"
@@ -311,6 +313,43 @@ func (f *forwarder) Probe(ctx context.Context, target string) protocol.ForwardPr
 	conn.Close()
 	p.OK = true
 	return p
+}
+
+// MeasureRTT 量一次到指定地址的 TCP 往返时间。
+//
+// 存在的理由：拨下一跳的**转发端口**量不到本段延迟。内核态转发在 PREROUTING
+// 就把目标改写并转发走了，下一跳自己的 TCP 栈不接这个连接，SYN-ACK 是从
+// 落地目标回来的 —— 于是量到的是整条链路的往返。要量本段，必须拨一个
+// **会在下一跳本地终结**的端口。
+//
+// 关键点：**连接被拒绝（RST）同样是一次有效测量**。RST 是对方内核直接回的，
+// 往返时间和握手成功时一样准。所以这里不要求端口上真有服务 ——
+// 只要那台机器的网络栈应答了，我们就拿到了想要的数字。
+func (f *forwarder) MeasureRTT(ctx context.Context, target string) (int, error) {
+	if target == "" {
+		return 0, nil
+	}
+
+	start := time.Now()
+	d := net.Dialer{Timeout: probeTimeout}
+	conn, err := d.DialContext(ctx, "tcp", target)
+	elapsed := int(time.Since(start).Milliseconds())
+
+	if err == nil {
+		conn.Close()
+		return elapsed, nil
+	}
+	if isConnRefused(err) {
+		// 端口关着，但对方的内核回了 RST —— 这正是我们要的往返时间。
+		return elapsed, nil
+	}
+	// 超时或不可达就是真的没量到。这不影响连通性结论，只是少一个数字。
+	return 0, err
+}
+
+// isConnRefused 判断错误是不是「对方回了 RST」。
+func isConnRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // ProbeListen 判断本机某个端口上有没有监听进程。

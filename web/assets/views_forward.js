@@ -391,21 +391,31 @@ const ForwardTestResult = {
                 <thead>
                     <tr>
                         <th>这一段</th>
-                        <th style="width:200px">实际拨的地址</th>
-                        <th style="width:100px">结果</th>
-                        <th style="width:90px">耗时</th>
+                        <th style="width:110px">本段延迟</th>
+                        <th style="width:130px">拨通耗时</th>
+                        <th style="width:90px">结果</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr v-for="(leg, i) in report.legs" :key="i">
-                        <td>{{ leg.from }} → {{ leg.to }}</td>
-                        <td class="mono">{{ leg.target || '—' }}</td>
+                        <td>
+                            {{ leg.from }} → {{ leg.to }}
+                            <div class="node-meta mono">拨 {{ leg.target || '—' }}</div>
+                        </td>
+                        <td class="tabular">
+                            <template v-if="leg.segment_ms">{{ leg.segment_ms }} ms</template>
+                            <span v-else class="muted" :title="leg.segment_note">—</span>
+                        </td>
+                        <td class="tabular">
+                            {{ leg.latency_ms }} ms
+                            <div v-if="leg.segment_ms && leg.latency_ms > leg.segment_ms"
+                                 class="node-meta">含下游 {{ leg.latency_ms - leg.segment_ms }} ms</div>
+                        </td>
                         <td>
                             <span class="badge" :class="leg.ok ? 'good' : 'critical'">
                                 <span class="dot"></span>{{ leg.ok ? '通' : '不通' }}
                             </span>
                         </td>
-                        <td class="tabular">{{ leg.latency_ms }} ms</td>
                     </tr>
                 </tbody>
             </table>
@@ -413,7 +423,17 @@ const ForwardTestResult = {
         <div class="field-hint" style="margin-top:8px">
             测的是链路上<b>相邻两点</b>之间的连通性（入口拨第 2 跳、第 2 跳拨第 3 跳…，
             最后一跳才拨落地目标），这样才能看出是哪一段断了。
-            有多个入口时每个入口各测一段。
+            有多个入口时每个入口各测一段。<br>
+            <b>本段延迟</b>才是这一段的真实网络延迟，判断「哪一段慢」看它。<br>
+            <b>拨通耗时</b>是拨下一跳的转发端口花的时间，它<b>包含了下游</b>：
+            内核态转发在包进协议栈之前就把目标地址改写转发走了，下一跳自己并不接这个连接，
+            握手是和最终落地目标完成的 —— 所以越靠前的跳，这个数字越大。它只用来判断通不通。
+        </div>
+        <div v-if="report.legs.some(l => !l.segment_ms && l.segment_note)"
+             class="field-hint" style="margin-top:6px">
+            <template v-for="(leg, i) in report.legs.filter(l => !l.segment_ms && l.segment_note)" :key="i">
+                <div>· {{ leg.from }}：{{ leg.segment_note }}</div>
+            </template>
         </div>
 
         <template v-for="(leg, i) in report.legs" :key="'d' + i">

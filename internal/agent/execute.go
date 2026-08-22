@@ -48,6 +48,16 @@ func (a *Agent) execute(ctx context.Context, cmd protocol.Command) protocol.Comm
 		if req.ListenPort > 0 {
 			probe.Listening = a.fwd.ProbeListen(req.ListenPort)
 		}
+		// 本段的真实网络延迟得单独量：拨转发端口量到的是整条链路的往返，
+		// 因为内核态转发根本不让下一跳自己接这个连接。
+		if t := strings.TrimSpace(req.RTTTarget); t != "" {
+			rtt, err := a.fwd.MeasureRTT(ctx, t)
+			if err != nil {
+				probe.RTTError = err.Error()
+			} else {
+				probe.RTTMS = rtt
+			}
+		}
 		out, err := json.Marshal(probe)
 		if err != nil {
 			res.Error = "序列化探测结果失败: " + err.Error()
