@@ -212,3 +212,77 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// 「每天还能用多少」= (熔断线 - 已用) ÷ 本账期剩余天数。
+//
+// 比单看百分比有用：进度条说「用了 40%」，你还得自己算今天几号、还剩几天、
+// 这个速度撑不撑得到月底。这个数直接回答那个问题。
+func TestDailyBudget(t *testing.T) {
+	quota := QuotaFromGB(100, 100)
+	// 8 月 22 日（北京时间），31 天的月份 → 含今天还剩 10 天。
+	at := time.Date(2026, 8, 22, 12, 0, 0, 0, time.FixedZone("CST", 8*3600))
+
+	// 熔断线 100%，已用 50GB，还剩 50GB / 10 天 = 5GB/天。
+	st := EvaluateAt(map[Bucket]int64{BucketMainland: 50 * GB}, quota, 100, at)
+	if st.DaysLeft != 10 {
+		t.Fatalf("8 月 22 日应剩 10 天（含今天），实际 %d", st.DaysLeft)
+	}
+	if got := st.Buckets[0].DailyBudget; got != 5*GB {
+		t.Errorf("每天预算应是 5GB，实际 %s", HumanBytes(got))
+	}
+}
+
+// 预算要按**熔断线**算，不是按额度上限。
+// 用户设了 95% 就是打算停在 95%，剩下那 5% 不该算进「还能用」里。
+func TestDailyBudgetRespectsThreshold(t *testing.T) {
+	quota := QuotaFromGB(100, 100)
+	at := time.Date(2026, 8, 22, 12, 0, 0, 0, time.FixedZone("CST", 8*3600))
+
+	st := EvaluateAt(map[Bucket]int64{BucketMainland: 45 * GB}, quota, 95, at)
+	// (95 - 45) / 10 = 5GB/天，而不是 (100-45)/10 = 5.5GB/天。
+	if got := st.Buckets[0].DailyBudget; got != 5*GB {
+		t.Errorf("应按 95%% 熔断线算出 5GB/天，实际 %s（按 100%% 算会是 5.5GB）",
+			HumanBytes(got))
+	}
+}
+
+// 已经越线了就没有预算可言，别给个负数或者绕回大正数。
+func TestDailyBudgetZeroWhenExceeded(t *testing.T) {
+	quota := QuotaFromGB(100, 100)
+	at := time.Date(2026, 8, 22, 12, 0, 0, 0, time.FixedZone("CST", 8*3600))
+
+	st := EvaluateAt(map[Bucket]int64{BucketMainland: 120 * GB}, quota, 95, at)
+	if got := st.Buckets[0].DailyBudget; got != 0 {
+		t.Errorf("越线之后预算应是 0，实际 %d", got)
+	}
+	if !st.Buckets[0].Exceeded {
+		t.Error("用超了却没标成越线")
+	}
+}
+
+func TestDaysLeftInCycle(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	cases := []struct {
+		at   time.Time
+		want int
+	}{
+		{time.Date(2026, 8, 1, 0, 0, 0, 0, cst), 31}, // 8 月 31 天
+		{time.Date(2026, 8, 22, 12, 0, 0, 0, cst), 10},
+		{time.Date(2026, 8, 31, 23, 59, 0, 0, cst), 1}, // 最后一天，含今天算 1
+		{time.Date(2026, 2, 1, 0, 0, 0, 0, cst), 28},   // 平年 2 月
+		{time.Date(2028, 2, 1, 0, 0, 0, 0, cst), 29},   // 闰年 2 月
+	}
+	for _, tc := range cases {
+		if got := DaysLeftInCycle(tc.at); got != tc.want {
+			t.Errorf("DaysLeftInCycle(%s) = %d，期望 %d",
+				tc.at.Format("2006-01-02"), got, tc.want)
+		}
+	}
+
+	// 账期按北京时间切：UTC 8 月 31 日 17:00 已经是北京 9 月 1 日，
+	// 该算成 9 月的第一天（30 天）。
+	utc := time.Date(2026, 8, 31, 17, 0, 0, 0, time.UTC)
+	if got := DaysLeftInCycle(utc); got != 30 {
+		t.Errorf("跨时区边界算错了：%d，期望 30（已经是北京时间 9 月 1 日）", got)
+	}
+}

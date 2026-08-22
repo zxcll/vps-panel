@@ -209,6 +209,7 @@ export const PROVIDER_TYPES = [
 // --- 阿里云 CDT ---
 
 export const CDT_SITES = [
+    { value: "auto", label: "自动识别（推荐）" },
     { value: "international", label: "国际站（USD）" },
     { value: "china", label: "中国站（CNY）" },
 ];

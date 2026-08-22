@@ -29,6 +29,11 @@ const (
 	cdtTickInterval    = 5 * time.Second
 	cdtScheduleEvery   = 1 * time.Minute
 	cdtDailyReportHour = 0
+	// cdtTransitionPoll 是实例正在开机/关机时的加急间隔。
+	//
+	// 用户可能把同步间隔设成 600 秒省 API 调用，那点完开关机要干等十分钟
+	// 界面才更新，会让人以为没生效又去点一次。状态落定之前先按这个频率盯着。
+	cdtTransitionPoll = 15 * time.Second
 )
 
 // cdtGuard 保证同一个账号同时只有一条会改变机器状态的动作在跑。
@@ -124,8 +129,21 @@ func (s *Server) cdtTick(ctx context.Context) {
 			s.cdtRunSchedule(ctx, a)
 		}
 
-		// 到点了才去查阿里云。间隔由这个账号自己配。
-		if !s.cdtDue(strconv.FormatInt(a.ID, 10), a.SyncInterval(), now) {
+		// 到点了才去查阿里云。间隔由这个账号自己配，但有实例正在开机/关机时
+		// 加急盯着，别让用户点完开关机干等一整个周期。
+		interval := a.SyncInterval()
+		transitioning := s.cdtHasTransitioning(ctx, a.ID)
+		if transitioning && interval > cdtTransitionPoll {
+			interval = cdtTransitionPoll
+		}
+		if !s.cdtDue(strconv.FormatInt(a.ID, 10), interval, now) {
+			continue
+		}
+
+		// 过渡态只刷实例状态就够了 —— 流量和账单那边根本不会因为一次开关机
+		// 有什么变化，白白多打两次接口。
+		if transitioning {
+			s.cdtSyncInstances(ctx, a)
 			continue
 		}
 		s.cdtCheckTraffic(ctx, a)
@@ -134,6 +152,23 @@ func (s *Server) cdtTick(ctx context.Context) {
 	}
 
 	s.cdtDailyReport(ctx, now)
+}
+
+// cdtHasTransitioning 判断这个账号下有没有实例正处在开机/关机的中间态。
+//
+// 只看本地快照，不打阿里云接口 —— 这个判断本身要在每个 tick 上跑，
+// 让它去发请求就本末倒置了。
+func (s *Server) cdtHasTransitioning(ctx context.Context, accountID int64) bool {
+	insts, err := s.st.CDTInstancesOf(ctx, accountID)
+	if err != nil {
+		return false
+	}
+	for _, inst := range insts {
+		if inst.Status == alicloud.StatusStarting || inst.Status == alicloud.StatusStopping {
+			return true
+		}
+	}
+	return false
 }
 
 // syncCDTAccount 把一个账号的流量、账单、实例全拉一遍，并做熔断判定。
@@ -479,7 +514,7 @@ func (s *Server) cdtKeepAlive(ctx context.Context, a *store.CDTAccount) {
 
 // cdtHandleNoStock 处理「可用区售罄」。
 //
-// 售罄是常态，保活每分钟试一次，不能每次都发通知 —— 一晚上能刷几百条。
+// 售罄是常态，保活每一轮都会试，不能每次都发通知 —— 一晚上能刷几百条。
 // 所以只在第一次报，恢复时再报一次。
 func (s *Server) cdtHandleNoStock(ctx context.Context, a *store.CDTAccount,
 	inst *store.CDTInstance, err error) {

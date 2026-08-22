@@ -24,7 +24,7 @@ const AccountEditor = {
             access_key_id: a?.access_key_id || "",
             access_key_secret: "",
             region_id: a?.region_id || "cn-hongkong",
-            site_type: a?.site_type || "international",
+            site_type: a?.site_type || "auto",
             // 0 交给后端回落成阿里云的官方额度（20 / 200），
             // 不在前端写死，免得规则变了两边对不上。
             quota_mainland_gb: a?.quota_mainland_gb ?? 20,
@@ -92,7 +92,11 @@ const AccountEditor = {
                     <select v-model="form.site_type">
                         <option v-for="s in CDT_SITES" :key="s.value" :value="s.value">{{ s.label }}</option>
                     </select>
-                    <div class="field-hint">只影响账单接口的域名和记账货币</div>
+                    <div class="field-hint">
+                        选「自动识别」的话，保存时面板会拿两个站点的账单接口各试一次，
+                        哪个通就是哪个 —— 不用自己记账号是在哪注册的。
+                        地域推不出站点：国际站账号照样能在杭州开机器。
+                    </div>
                 </div>
             </div>
 
@@ -187,7 +191,9 @@ const AccountEditor = {
                 抢占式实例被回收后自动拉起
             </label>
             <div class="field-hint" style="margin-bottom:12px">
-                每分钟查一次受守护的抢占式实例，发现停了就重新启动。
+                按上面设的<b>同步间隔</b>查一次受守护的抢占式实例，发现停了就重新启动
+                （实例正在开机/关机的过渡状态时会自动加快到 15 秒一次，
+                 省得点完开关机要干等一整个周期）。
                 可用区售罄（NoStock）时只在第一次告警，之后静默重试，恢复了再报一次。
                 账号处于熔断状态时保活不生效——那时候机器是面板故意停的。
             </div>
@@ -442,6 +448,14 @@ export const CDTView = {
                             <div class="meter-track">
                                 <div class="meter-fill" :class="meterClass(u)"
                                      :style="{ width: Math.min(100, u.percent) + '%' }"></div>
+                            </div>
+                            <div class="node-meta" style="margin-top:4px">
+                                <template v-if="u.daily_budget_bytes">
+                                    距熔断线还剩 {{ a.usage.days_left }} 天，
+                                    每天还能用 <b>{{ fmtBytes(u.daily_budget_bytes) }}</b>
+                                </template>
+                                <template v-else-if="u.exceeded">已越过熔断线</template>
+                                <template v-else>额度已用尽</template>
                             </div>
                         </div>
                     </div>

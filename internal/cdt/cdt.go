@@ -114,11 +114,19 @@ type BucketUsage struct {
 	Percent float64 `json:"percent"`
 	// Exceeded 表示这个池已经越过熔断线。
 	Exceeded bool `json:"exceeded"`
+	// DailyBudget 是「按剩下的天数摊，每天还能用多少字节」。
+	//
+	// 比单看一个百分比有用得多：进度条说「用了 40%」，你还得自己算今天几号、
+	// 还剩几天、这个速度撑不撑得到月底。这个数直接回答那个问题。
+	// 已经越线时是 0。
+	DailyBudget int64 `json:"daily_budget_bytes"`
 }
 
 // Status 是一次完整的额度判定结果。
 type Status struct {
 	Buckets []BucketUsage `json:"buckets"`
+	// DaysLeft 是这个账期还剩几天（含今天），DailyBudget 就是拿它除的。
+	DaysLeft int `json:"days_left"`
 	// Trip 为真表示至少有一个池越线，该熔断了。
 	Trip bool `json:"trip"`
 	// Reason 是给用户看的一句话，说明是哪个池、用了多少、线在哪。
@@ -146,11 +154,18 @@ func SumByBucket(traffic map[string]int64) map[Bucket]int64 {
 // **两个池分别判**，任意一个越线就熔断。不能把两边加起来对总额度判：
 // 中国内地只有 20 GB，被 200 GB 的非中国内地一平均，跑爆了也看不出来。
 func Evaluate(used map[Bucket]int64, quota Quota, thresholdPercent float64) Status {
+	return EvaluateAt(used, quota, thresholdPercent, time.Now())
+}
+
+// EvaluateAt 是 Evaluate 的可注入时间版本，供测试固定「今天几号」。
+func EvaluateAt(used map[Bucket]int64, quota Quota, thresholdPercent float64, at time.Time) Status {
 	if thresholdPercent <= 0 {
 		thresholdPercent = 100
 	}
 
-	st := Status{Buckets: make([]BucketUsage, 0, 2)}
+	daysLeft := DaysLeftInCycle(at)
+	st := Status{Buckets: make([]BucketUsage, 0, 2), DaysLeft: daysLeft}
+
 	// 顺序固定，界面上不能每次刷新都换位置。
 	for _, b := range []Bucket{BucketMainland, BucketOverseas} {
 		limit := quota.Of(b)
@@ -163,6 +178,12 @@ func Evaluate(used map[Bucket]int64, quota Quota, thresholdPercent float64) Stat
 		if limit > 0 {
 			u.Percent = float64(u.Used) / float64(limit) * 100
 			u.Exceeded = u.Percent >= thresholdPercent
+			// 预算按**熔断线**算而不是按额度上限：用户设了 95% 就是打算
+			// 停在 95%，剩下那 5% 不该算进"还能用"里。
+			budget := int64(float64(limit)*thresholdPercent/100) - u.Used
+			if budget > 0 && daysLeft > 0 {
+				u.DailyBudget = budget / int64(daysLeft)
+			}
 		}
 		if u.Exceeded && !st.Trip {
 			st.Trip = true
@@ -189,6 +210,18 @@ func CycleOf(t time.Time) Cycle {
 
 // CurrentCycle 是此刻的账期。
 func CurrentCycle() Cycle { return CycleOf(time.Now()) }
+
+// DaysLeftInCycle 返回这个账期还剩几天，**含今天**。
+//
+// 含今天是有意的：今天还没过完，今天的额度还能用。不含的话，
+// 每个月最后一天会除以 0，或者算出「今天不能用任何流量」这种荒谬结论。
+func DaysLeftInCycle(at time.Time) int {
+	t := at.In(beijing)
+	// 下个月 0 号 = 这个月最后一天。
+	daysInMonth := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, beijing).Day()
+	left := daysInMonth - t.Day() + 1
+	return max(left, 1)
+}
 
 // Start 返回这个账期的起始时刻（北京时间月初零点）。
 func (c Cycle) Start() (time.Time, error) {

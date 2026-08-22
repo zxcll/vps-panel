@@ -108,8 +108,8 @@ func (c *Client) DescribeInstances(ctx context.Context) ([]Instance, error) {
 	}
 }
 
-// DescribeInstanceStatus 只查一台实例的状态。保活循环每分钟跑一次，
-// 用它比拉整个列表轻得多。
+// DescribeInstanceStatus 只查一台实例的状态。
+// 保活循环每轮都要用它，比拉整个列表轻得多。
 func (c *Client) DescribeInstanceStatus(ctx context.Context, instanceID string) (string, error) {
 	var res struct {
 		InstanceStatuses struct {

@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS cdt_accounts (
     tripped_reason        TEXT    NOT NULL DEFAULT '',
     -- 记下是哪个账期熔断的，账期一翻页就自动解除。
     tripped_cycle         TEXT    NOT NULL DEFAULT '',
-    -- 抢占式实例售罄只在第一次告警，避免每分钟刷一条。
+    -- 抢占式实例售罄只在第一次告警，避免保活每轮都刷一条。
     nostock_notified      INTEGER NOT NULL DEFAULT 0,
 
     -- 多久去阿里云查一次（秒）。流量、账单、实例状态、抢占式保活都按它走。

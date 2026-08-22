@@ -43,6 +43,10 @@ type cdtRegionView struct {
 	BucketLabel      string `json:"bucket_label"`
 }
 
+// cdtSiteAuto 表示「让面板自己去认」。它只出现在请求里，
+// 落库时一定已经被换成 china 或 international 的具体值。
+const cdtSiteAuto = "auto"
+
 func cdtSiteLabel(site string) string {
 	if site == store.CDTSiteChina {
 		return "中国站"
@@ -91,8 +95,12 @@ func (req *cdtAccountRequest) validate() error {
 	if req.RegionID == "" {
 		return fmt.Errorf("请选择地域（ECS 实例在哪个地域就填哪个）")
 	}
-	if req.SiteType != store.CDTSiteChina {
-		req.SiteType = store.CDTSiteInternational
+	// "auto" 表示让面板自己去认。留到 checkCDTCredentials 那一步再定 ——
+	// 认站点要实拨接口，正好和验凭据合并成一次。
+	switch req.SiteType {
+	case store.CDTSiteChina, store.CDTSiteInternational, cdtSiteAuto:
+	default:
+		req.SiteType = cdtSiteAuto
 	}
 	if req.ShutdownMode != store.CDTStopKeepCharging {
 		req.ShutdownMode = store.CDTStopCharging
@@ -239,7 +247,8 @@ func (s *Server) handleUpdateCDTAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Secret 留空表示不改。要验凭据的话得把库里那份解出来配上新的 AK。
+	// Secret 留空表示不改。没有明文就没法实拨，也就认不了站点，
+	// 那就沿用库里已经存着的那个值 —— 总之不能把 "auto" 这个占位符落库。
 	var enc []byte
 	if req.AccessKeySecret != "" {
 		if err := s.checkCDTCredentials(ctx, &req); err != nil {
@@ -250,6 +259,8 @@ func (s *Server) handleUpdateCDTAccount(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, "加密凭据失败: "+err.Error())
 			return
 		}
+	} else if req.SiteType == cdtSiteAuto {
+		req.SiteType = a.SiteType
 	}
 
 	req.applyTo(a)
@@ -557,14 +568,30 @@ func (s *Server) cdtClient(ctx context.Context, accountID int64) (*alicloud.Clie
 }
 
 // checkCDTCredentials 用请求里带的凭据实拨一次，确认它真的能用。
+//
+// 站点填了 auto 的话，顺便把它认出来写回 req —— 认站点本来就要实拨接口，
+// 和验凭据合并成一次，省一轮往返。
 func (s *Server) checkCDTCredentials(ctx context.Context, req *cdtAccountRequest) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	if req.SiteType == cdtSiteAuto {
+		site, _, err := alicloud.DetectSite(probeCtx, req.AccessKeyID, req.AccessKeySecret, req.RegionID)
+		if err != nil {
+			// 认不出站点不一定是凭据坏了 —— 也可能只是没给 BSS 权限。
+			// 那种情况下 CDT 和 ECS 照样能用，所以退回默认值继续往下验，
+			// 别为了一个只影响账单展示的字段把用户挡在门外。
+			s.log.Warn("认不出阿里云账号站点，按国际站处理", "err", err)
+			req.SiteType = store.CDTSiteInternational
+		} else {
+			req.SiteType = site
+		}
+	}
+
 	client, err := alicloud.New(req.AccessKeyID, req.AccessKeySecret, req.RegionID, req.SiteType)
 	if err != nil {
 		return err
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
 	if _, err := client.ListInternetTraffic(probeCtx); err != nil {
 		return fmt.Errorf("这组凭据调不通阿里云 CDT 接口：%w"+
 			"（确认 RAM 用户已授予 CDT 权限，且 AccessKey 没被禁用）", err)

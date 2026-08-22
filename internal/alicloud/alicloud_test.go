@@ -347,3 +347,68 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// DetectSite 拿两个站点的账单接口各试一次，哪个通就是哪个。
+//
+// 为什么值得自动认：账单接口在两个站点是不同域名，选错了余额和待还就一直
+// 拉不到，而报错长得像「权限不够」，用户很难联想到是站点选错了。
+// 地域也推不出站点 —— 国际站账号照样能在杭州开机器。
+func TestDetectSite(t *testing.T) {
+	// 只有其中一个域名认这组凭据，另一个报错。
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		seen = append(seen, r.PostForm.Get("Action"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Code":"200","Success":true,"Data":{"AvailableAmount":"1.00","Currency":"CNY"}}`))
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	old := bssEndpoints
+	t.Cleanup(func() { bssEndpoints = old })
+	// 国际站指向能用的假服务，中国站指向一个必然连不上的地址。
+	bssEndpoints = map[string]string{
+		SiteInternational: host,
+		SiteChina:         "127.0.0.1:1",
+	}
+	oldScheme := detectScheme
+	detectScheme = "http"
+	t.Cleanup(func() { detectScheme = oldScheme })
+
+	site, currency, err := DetectSite(context.Background(), "k", "s", "cn-hongkong")
+	if err != nil {
+		t.Fatalf("应当认出国际站: %v", err)
+	}
+	if site != SiteInternational {
+		t.Errorf("认成了 %q，期望 %q", site, SiteInternational)
+	}
+	if currency != "USD" {
+		t.Errorf("国际站货币应是 USD，实际 %q", currency)
+	}
+	if len(seen) == 0 || seen[0] != "QueryAccountBalance" {
+		t.Errorf("应当用查余额来试探，实际调用了 %v", seen)
+	}
+}
+
+// 两个站点都不通时要把两边的错误都带回去 ——
+// 只报一个会让人以为是那个站点的问题，而实际上多半是凭据本身不对。
+func TestDetectSiteReportsBothFailures(t *testing.T) {
+	old := bssEndpoints
+	t.Cleanup(func() { bssEndpoints = old })
+	bssEndpoints = map[string]string{
+		SiteInternational: "127.0.0.1:1",
+		SiteChina:         "127.0.0.1:2",
+	}
+	oldScheme := detectScheme
+	detectScheme = "http"
+	t.Cleanup(func() { detectScheme = oldScheme })
+
+	_, _, err := DetectSite(context.Background(), "k", "s", "cn-hongkong")
+	if err == nil {
+		t.Fatal("两个都不通时应当报错")
+	}
+	if !strings.Contains(err.Error(), "国际站") || !strings.Contains(err.Error(), "中国站") {
+		t.Errorf("错误里应同时提到两个站点，实际：%v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,52 @@ type BillItem struct {
 	Product           string  `json:"product"`
 	PretaxAmount      float64 `json:"pretax_amount"`
 	OutstandingAmount float64 `json:"outstanding_amount"`
+}
+
+// detectScheme 做成变量只为让单测能指向本地的 httptest 服务器。
+var detectScheme = "https"
+
+// DetectSite 认一下这组凭据属于中国站还是国际站。
+//
+// 为什么要自动认：账单接口在两个站点是不同域名，选错了余额和待还就一直拉不到，
+// 而报错长得像「权限不够」，用户很难联想到是站点选错了。ECS 地域也推不出站点 ——
+// 国际站账号照样可以在 cn-hangzhou 开机器。
+//
+// 做法很直接：拿两个域名各查一次余额，哪个通就是哪个。这是只读请求，
+// 代价就是最多两次调用。
+//
+// 返回 site 和该站点的记账货币。两个都不通说明凭据本身有问题，
+// 把两边的错误都带回去 —— 只报一个会让人以为是那个站点的问题。
+func DetectSite(ctx context.Context, keyID, secret, region string) (site, currency string, err error) {
+	var failures []string
+	// 先试国际站：用这个面板的人绝大多数是国际站（CDT 免费额度那 200GB
+	// 就是冲着非中国内地去的）。
+	for _, candidate := range []string{SiteInternational, SiteChina} {
+		c, buildErr := New(keyID, secret, region, candidate)
+		if buildErr != nil {
+			return "", "", buildErr
+		}
+		c.scheme = detectScheme
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		_, callErr := c.QueryAccountBalance(probeCtx)
+		cancel()
+
+		if callErr == nil {
+			cur, _ := c.Currency()
+			return candidate, cur, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s（%s）：%v",
+			siteLabel(candidate), bssEndpoints[candidate], callErr))
+	}
+	return "", "", fmt.Errorf("认不出这组凭据属于哪个站点，两边的账单接口都不通：\n  %s",
+		strings.Join(failures, "\n  "))
+}
+
+func siteLabel(site string) string {
+	if site == SiteChina {
+		return "中国站"
+	}
+	return "国际站"
 }
 
 // QueryAccountBalance 查账号余额。
