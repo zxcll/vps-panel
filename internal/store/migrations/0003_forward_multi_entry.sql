@@ -10,6 +10,11 @@
 --
 -- DROP INDEX IF EXISTS 和 CREATE INDEX IF NOT EXISTS 都是幂等的，
 -- 满足本项目「迁移每次启动全量重放」的要求。
+--
+-- 注意：光在这里 DROP 是**不够的**。0002 里那条 CREATE 必须一并删掉，
+-- 否则每次启动都是「0002 建、0003 删」，一旦库里已经有多入口数据，
+-- 0002 那一步就会被唯一约束打回来，面板直接起不来。详见 0002 里的注释。
+-- 这条 DROP 留着，是为了把老库里已经存在的那个索引清掉。
 DROP INDEX IF EXISTS idx_forward_hops_pos;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_hops_pos_node

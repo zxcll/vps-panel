@@ -48,7 +48,16 @@ CREATE TABLE IF NOT EXISTS forward_hops (
     mode           TEXT    NOT NULL DEFAULT 'kernel',  -- kernel|userspace
     bandwidth_mbps INTEGER NOT NULL DEFAULT 0          -- 0 = 不限速
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_hops_pos  ON forward_hops(rule_id, position);
+-- 这里**故意不建** (rule_id, position) 的唯一索引 —— 它在 0003 里被
+-- (rule_id, position, node_id) 取代了（入口允许多台机器共用 position 0）。
+--
+-- 别把它加回来。迁移是每次启动全量重放的：0002 建、0003 删，第一次升级时
+-- 因为索引本来就在，IF NOT EXISTS 是空操作，看着一切正常；等用户建了多入口
+-- 规则、面板再重启一次，0002 这次会真的去建索引，然后被已有数据打回来，
+-- **面板直接起不来**。这个坑踩过一次了。
+--
+-- 结论：在"全量重放"这个模型下，迁移文件描述的是**当前想要的 schema**，
+-- 后面的迁移放宽了约束，前面的迁移就必须跟着改，不能只靠新文件去 DROP。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_hops_port ON forward_hops(node_id, listen_port, proto);
 CREATE INDEX IF NOT EXISTS        idx_forward_hops_node ON forward_hops(node_id);
 

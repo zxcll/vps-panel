@@ -53,6 +53,83 @@ func TestMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+// 空库上重放迁移是不够的 —— 有些约束只有在**已有数据**的情况下才会炸。
+//
+// 真事：0002 建了 (rule_id, position) 的唯一索引，0003 把它换成
+// (rule_id, position, node_id)。第一次升级时索引本来就在，0002 的
+// IF NOT EXISTS 是空操作，一切看着正常；等用户建了多入口规则、面板再重启一次，
+// 0002 这次会真的去建索引，被已有数据打回来，**面板直接起不来**：
+//
+//	执行迁移 0002_forward.sql: UNIQUE constraint failed:
+//	forward_hops.rule_id, forward_hops.position
+//
+// 所以这条用例先造出多入口数据，再重放迁移。
+func TestMigrationReplaySurvivesMultiEntryData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+
+	st := openTestStore(t, path)
+	a := newForwardTestNode(t, st, "入口A")
+	b := newForwardTestNode(t, st, "入口B")
+	c := newForwardTestNode(t, st, "落地C")
+
+	// 两个入口共用 position 0 —— 正是老唯一索引不允许的形状。
+	if err := st.CreateForwardRule(ctx, &ForwardRule{
+		Name: "多入口", Proto: ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []ForwardHop{
+			{Position: 0, NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 0, NodeID: b.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 1, NodeID: c.ID, ListenPort: 20001, Mode: ForwardModeKernel},
+		},
+	}); err != nil {
+		t.Fatalf("建多入口规则失败: %v", err)
+	}
+	st.Close()
+
+	// 重放两次：第一次是"升级后第一次启动"，第二次才是真正的考验。
+	for i := range 2 {
+		again, err := Open(path)
+		if err != nil {
+			t.Fatalf("第 %d 次重放迁移失败（面板起不来就是这个错）: %v", i+1, err)
+		}
+		rules, err := again.ListForwardRules(ctx)
+		if err != nil {
+			again.Close()
+			t.Fatalf("第 %d 次重放后读规则失败: %v", i+1, err)
+		}
+		if len(rules) != 1 || len(rules[0].Hops) != 3 {
+			again.Close()
+			t.Fatalf("第 %d 次重放后数据不对：%d 条规则", i+1, len(rules))
+		}
+		again.Close()
+	}
+}
+
+// 「同一位置不能重复同一个节点」这条约束必须活下来 ——
+// 前面那条用例是放宽约束，别一放就放过头了。
+func TestMigrationKeepsPerNodeUniqueness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+
+	st := openTestStore(t, path)
+	a := newForwardTestNode(t, st, "入口A")
+	st.Close()
+
+	again := openTestStore(t, path)
+	err := again.CreateForwardRule(ctx, &ForwardRule{
+		Name: "重复入口", Proto: ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []ForwardHop{
+			{Position: 0, NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 0, NodeID: a.ID, ListenPort: 8444, Mode: ForwardModeKernel},
+		},
+	})
+	if err == nil {
+		t.Error("重放迁移后，同一位置重复同一个节点仍应被唯一索引拒绝")
+	}
+}
+
 func TestForwardRuleCRUD(t *testing.T) {
 	st := newForwardTestStore(t)
 	ctx := context.Background()
