@@ -39,6 +39,8 @@ type Server struct {
 	trustProxy bool
 	// fwdSync 记着每个节点最近下发成功的转发规则版本，避免无谓重发。
 	fwdSync *forwardSyncer
+	// cdt 是阿里云 CDT 后台循环的状态：账号级动作锁 + 各档子任务的分频计时。
+	cdt *cdtGuard
 }
 
 func New(
@@ -58,6 +60,7 @@ func New(
 		exec: exec, fo: fo, eng: eng, notifier: n, log: log,
 		trustProxy: cfg.TrustProxyHeaders,
 		fwdSync:    newForwardSyncer(),
+		cdt:        newCDTGuard(),
 	}
 }
 
@@ -127,6 +130,19 @@ func (s *Server) Handler() http.Handler {
 	auth("DELETE /api/forwards/{id}", s.handleDeleteForward)
 	auth("POST /api/forwards/{id}/toggle", s.handleToggleForward)
 	auth("POST /api/forwards/{id}/test", s.handleTestForward)
+
+	// 阿里云 CDT。字面量段优先于通配符段，所以 /accounts 和 /instances
+	// 不会和 /{id} 打架。
+	auth("GET /api/cdt/accounts", s.handleListCDTAccounts)
+	auth("POST /api/cdt/accounts", s.handleCreateCDTAccount)
+	auth("PUT /api/cdt/accounts/{id}", s.handleUpdateCDTAccount)
+	auth("DELETE /api/cdt/accounts/{id}", s.handleDeleteCDTAccount)
+	auth("POST /api/cdt/accounts/{id}/sync", s.handleSyncCDTAccount)
+	auth("POST /api/cdt/accounts/{id}/test", s.handleTestCDTAccount)
+	auth("GET /api/cdt/instances", s.handleListCDTInstances)
+	auth("POST /api/cdt/instances/{id}/start", s.handleStartCDTInstance)
+	auth("POST /api/cdt/instances/{id}/stop", s.handleStopCDTInstance)
+	auth("POST /api/cdt/instances/{id}/guard", s.handleGuardCDTInstance)
 
 	auth("GET /api/events", s.handleListEvents)
 	auth("GET /api/settings", s.handleGetSettings)

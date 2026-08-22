@@ -280,6 +280,105 @@ type ForwardHourlyPoint struct {
 	DownDelta int64     `json:"down_delta"`
 }
 
+// --- 阿里云 CDT ---
+
+// 阿里云站点。只影响账单接口的域名和记账货币。
+const (
+	CDTSiteChina         = "china"
+	CDTSiteInternational = "international"
+)
+
+// 停机模式。
+const (
+	// CDTStopCharging 是节省模式：停机后不再收实例费，代价是公网 IP 可能变。
+	CDTStopCharging = "StopCharging"
+	// CDTStopKeepCharging 是普通停机：继续计费、保留资源和 IP。
+	CDTStopKeepCharging = "KeepCharging"
+)
+
+// CDTAccount 是一组阿里云访问凭据加上它的守护策略。
+//
+// 这个结构体会直接 JSON 序列化给前端，所以**凭据密文不在里面**——
+// 它单独用 Store.CDTAccountCred 取。
+type CDTAccount struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	AccessKeyID string `json:"access_key_id"`
+	RegionID    string `json:"region_id"`
+	SiteType    string `json:"site_type"`
+
+	// 两个免费额度池，单位 GB。阿里云就是分开算的，不是一个总额度。
+	QuotaMainlandGB  float64 `json:"quota_mainland_gb"`
+	QuotaOverseasGB  float64 `json:"quota_overseas_gb"`
+	ThresholdPercent float64 `json:"threshold_percent"`
+	// OutstandingThreshold 是待还金额熔断线，0 表示不启用。
+	OutstandingThreshold float64 `json:"outstanding_threshold"`
+	ShutdownMode         string  `json:"shutdown_mode"`
+
+	KeepAlive     bool   `json:"keep_alive"`
+	AutoStartTime string `json:"auto_start_time"`
+	AutoStopTime  string `json:"auto_stop_time"`
+	ScheduleTZ    string `json:"schedule_tz"`
+
+	// TrippedAt 非零表示这个账号已被面板熔断停机。
+	TrippedAt       time.Time `json:"tripped_at"`
+	TrippedReason   string    `json:"tripped_reason"`
+	TrippedCycle    string    `json:"tripped_cycle"`
+	NoStockNotified bool      `json:"nostock_notified"`
+
+	LastSyncAt time.Time `json:"last_sync_at"`
+	LastError  string    `json:"last_error"`
+	Enabled    bool      `json:"enabled"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// Tripped 判断这个账号当前是不是处于熔断停机状态。
+func (a *CDTAccount) Tripped() bool { return !a.TrippedAt.IsZero() }
+
+// CDTInstance 是一台 ECS 实例的快照。
+type CDTInstance struct {
+	ID           int64  `json:"id"`
+	AccountID    int64  `json:"account_id"`
+	InstanceID   string `json:"instance_id"`
+	InstanceName string `json:"instance_name"`
+	RegionID     string `json:"region_id"`
+	ZoneID       string `json:"zone_id"`
+	Status       string `json:"status"`
+	PublicIP     string `json:"public_ip"`
+	InstanceType string `json:"instance_type"`
+
+	BandwidthMbps int  `json:"bandwidth_mbps"`
+	IsSpot        bool `json:"is_spot"`
+	// Guarded 表示这台实例受熔断 / 保活 / 定时开关机管辖。
+	// 不打这个标记的实例，面板只看不动。
+	Guarded bool `json:"guarded"`
+
+	LastSynced time.Time `json:"last_synced"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// CDTTraffic 是某账号某账期在一个业务地域上的出方向流量。
+type CDTTraffic struct {
+	AccountID        int64     `json:"account_id"`
+	Cycle            string    `json:"cycle"`
+	BusinessRegionID string    `json:"business_region_id"`
+	TrafficType      string    `json:"traffic_type"`
+	TrafficBytes     int64     `json:"traffic_bytes"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// CDTBill 是某账号某账期的余额与待还金额快照。
+type CDTBill struct {
+	AccountID       int64     `json:"account_id"`
+	Cycle           string    `json:"cycle"`
+	AvailableAmount float64   `json:"available_amount"`
+	Outstanding     float64   `json:"outstanding"`
+	Currency        string    `json:"currency"`
+	Symbol          string    `json:"symbol"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
 // 事件级别。
 const (
 	LevelInfo  = "info"

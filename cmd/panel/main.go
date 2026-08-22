@@ -150,6 +150,9 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	// 转发规则的对账循环。改规则时会立刻下发一次，这个循环只负责
 	// 把当时离线或下发失败的节点补上。
 	go srv.RunForwardSync(ctx)
+	// 阿里云 CDT：拉流量/账单/实例，并按配置做熔断停机、抢占式实例保活、
+	// 定时开关机。没配账号时它每 30 秒空转一次，代价可以忽略。
+	go srv.RunCDTSync(ctx)
 
 	printBanner(log, cfg.Listen, cfg.DataDir, initialPassword)
 

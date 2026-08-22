@@ -19,7 +19,12 @@ const (
 	EventCycleReset    = "cycle_reset"
 	EventAgentReport   = "agent_report"
 	EventForwardApply  = "forward_apply"
-	EventSystem        = "system"
+	// EventCDTSync 是阿里云 CDT 的同步结果（拉流量/账单/实例）。
+	EventCDTSync = "cdt_sync"
+	// EventCDTAction 是面板对阿里云实例真正动了手：熔断停机、保活拉起、
+	// 定时开关机。这类事件一定要留痕，机器被停了得能查到是谁停的、为什么。
+	EventCDTAction    = "cdt_action"
+	EventSystem       = "system"
 )
 
 func (s *Store) AddEvent(ctx context.Context, nodeID *int64, typ, level, msg string) error {

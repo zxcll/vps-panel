@@ -206,6 +206,41 @@ export const PROVIDER_TYPES = [
     { value: "alidns", label: "阿里云 DNS" },
 ];
 
+// --- 阿里云 CDT ---
+
+export const CDT_SITES = [
+    { value: "international", label: "国际站（USD）" },
+    { value: "china", label: "中国站（CNY）" },
+];
+
+export const CDT_SHUTDOWN_MODES = [
+    { value: "StopCharging", label: "节省模式（停机不计费）",
+      hint: "按量付费的 VPC 实例停机后不再收实例费，这是熔断想要的效果。代价是公网 IP 可能会变" },
+    { value: "KeepCharging", label: "普通停机（继续计费）",
+      hint: "保留资源和公网 IP，但实例费照收。只在需要固定 IP 时选它" },
+];
+
+// 阿里云常用地域。CDT 流量是账号级的，这个只决定去哪个地域拉 ECS 实例列表。
+export const CDT_REGIONS = [
+    { value: "cn-hongkong", label: "中国香港（cn-hongkong）" },
+    { value: "ap-southeast-1", label: "新加坡（ap-southeast-1）" },
+    { value: "ap-southeast-5", label: "印尼雅加达（ap-southeast-5）" },
+    { value: "ap-northeast-1", label: "日本东京（ap-northeast-1）" },
+    { value: "ap-northeast-2", label: "韩国首尔（ap-northeast-2）" },
+    { value: "us-west-1", label: "美国硅谷（us-west-1）" },
+    { value: "us-east-1", label: "美国弗吉尼亚（us-east-1）" },
+    { value: "eu-central-1", label: "德国法兰克福（eu-central-1）" },
+    { value: "eu-west-1", label: "英国伦敦（eu-west-1）" },
+    { value: "me-east-1", label: "阿联酋迪拜（me-east-1）" },
+    { value: "cn-hangzhou", label: "华东1 杭州（cn-hangzhou）" },
+    { value: "cn-shanghai", label: "华东2 上海（cn-shanghai）" },
+    { value: "cn-beijing", label: "华北2 北京（cn-beijing）" },
+    { value: "cn-zhangjiakou", label: "华北3 张家口（cn-zhangjiakou）" },
+    { value: "cn-shenzhen", label: "华南1 深圳（cn-shenzhen）" },
+    { value: "cn-guangzhou", label: "华南3 广州（cn-guangzhou）" },
+    { value: "cn-chengdu", label: "西南1 成都（cn-chengdu）" },
+];
+
 export const COMMON_TIMEZONES = [
     "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Tokyo", "Asia/Singapore",
     "Asia/Seoul", "Asia/Kolkata", "UTC", "Europe/London", "Europe/Berlin",

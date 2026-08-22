@@ -7,6 +7,7 @@ import { NodeDetailView, OverviewView } from "./views_overview.js";
 import { NodesView } from "./views_nodes.js";
 import { DNSView } from "./views_dns.js";
 import { ForwardView } from "./views_forward.js";
+import { CDTView } from "./views_cdt.js";
 import { EventsView, SettingsView } from "./views_settings.js";
 
 const LoginView = {
@@ -63,6 +64,7 @@ const NAV = [
     { key: "nodes", label: "节点管理", icon: "▦" },
     { key: "forward", label: "转发规则", icon: "⇉" },
     { key: "dns", label: "域名切换", icon: "⇄" },
+    { key: "cdt", label: "阿里云 CDT", icon: "☁" },
     { key: "events", label: "事件日志", icon: "☰" },
     { key: "settings", label: "设置", icon: "⚙" },
 ];
@@ -70,7 +72,7 @@ const NAV = [
 const App = {
     components: {
         LoginView, OverviewView, NodesView, NodeDetailView,
-        DNSView, ForwardView, EventsView, SettingsView, Toasts,
+        DNSView, ForwardView, CDTView, EventsView, SettingsView, Toasts,
     },
     setup() {
         const route = ref(parseHash());
@@ -155,6 +157,7 @@ const App = {
                                 @back="go('overview')" @edit="go('nodes')" />
                 <ForwardView v-else-if="route.page === 'forward'" />
                 <DNSView v-else-if="route.page === 'dns'" />
+                <CDTView v-else-if="route.page === 'cdt'" />
                 <EventsView v-else-if="route.page === 'events'" />
                 <SettingsView v-else-if="route.page === 'settings'" />
                 <div v-else class="empty">页面不存在</div>
