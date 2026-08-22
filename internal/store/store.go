@@ -91,11 +91,84 @@ func (s *Store) migrate() error {
 		}
 		// 迁移全部写成幂等的（IF NOT EXISTS），所以每次启动直接重放即可，
 		// 不需要额外的版本表。
+		//
+		// 注意这个模型有个必须守住的规矩：**迁移文件描述的是"当前想要的
+		// schema"**。后面的迁移放宽了前面某条约束，前面那个文件就得跟着改，
+		// 不能只靠新文件去 DROP —— 否则每次启动都是"前面建、后面删"，
+		// 一旦库里已经有了不满足旧约束的数据，前面那步就会把启动整个卡住。
+		// 这个坑踩过一次（见 0002/0003 里的注释）。
 		if _, err := s.db.Exec(string(b)); err != nil {
 			return fmt.Errorf("执行迁移 %s: %w", name, err)
 		}
 	}
+	return s.addMissingColumns()
+}
+
+// newColumn 是一条「表上该有但老库里可能还没有」的列。
+type newColumn struct {
+	table  string
+	column string
+	// ddl 是 ALTER TABLE ADD COLUMN 后面那一截，要带上类型和默认值。
+	ddl string
+}
+
+// 给已有的库补列。
+//
+// 为什么不能写进 .sql 文件：SQLite 的 ALTER TABLE ADD COLUMN **没有**
+// IF NOT EXISTS，而这个项目的迁移是每次启动全量重放的 —— 直接写进去，
+// 第二次启动就会因为「列已存在」而报错，面板起不来。
+//
+// 所以走 PRAGMA table_info 查一下再决定加不加。CREATE TABLE 那边同时也
+// 会带上新列，新装的库一次到位，这里只管老库。
+var pendingColumns = []newColumn{
+	{"cdt_accounts", "sync_interval_sec", "INTEGER NOT NULL DEFAULT 300"},
+}
+
+func (s *Store) addMissingColumns() error {
+	for _, c := range pendingColumns {
+		has, err := s.hasColumn(c.table, c.column)
+		if err != nil {
+			return fmt.Errorf("检查 %s.%s 是否存在: %w", c.table, c.column, err)
+		}
+		if has {
+			continue
+		}
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.ddl)
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("给 %s 补列 %s: %w", c.table, c.column, err)
+		}
+	}
 	return nil
+}
+
+// hasColumn 查表上有没有这一列。表本身不存在时返回 true，
+// 让调用方跳过 —— 表都没有就轮不到补列，那是迁移文件的事。
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	any := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		any = true
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	// 一行都没有 = 表不存在。
+	return !any, nil
 }
 
 // --- 时间转换辅助 ---

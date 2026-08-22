@@ -70,7 +70,9 @@ type cdtAccountRequest struct {
 	AutoStartTime string `json:"auto_start_time"`
 	AutoStopTime  string `json:"auto_stop_time"`
 	ScheduleTZ    string `json:"schedule_tz"`
-	Enabled       bool   `json:"enabled"`
+	// SyncIntervalSec 是多久去阿里云查一次（秒）。0 表示用默认值。
+	SyncIntervalSec int  `json:"sync_interval_sec"`
+	Enabled         bool `json:"enabled"`
 }
 
 // validate 校验并归一化。错误消息直接显示给用户，所以要带上出错的值。
@@ -106,6 +108,16 @@ func (req *cdtAccountRequest) validate() error {
 	}
 	if req.OutstandingThreshold < 0 {
 		return fmt.Errorf("待还金额熔断线不能是负数（填 0 表示不启用这一条）")
+	}
+
+	// 0 表示用默认值，交给 store.CDTAccount.SyncInterval 兜底。
+	// 但填了一个太小的数要挡住：每轮同步要打三四次阿里云接口，
+	// 设成一两秒很快会撞上人家的调用频率限制。
+	if req.SyncIntervalSec != 0 &&
+		(req.SyncIntervalSec < store.MinCDTSyncIntervalSec || req.SyncIntervalSec > store.MaxCDTSyncIntervalSec) {
+		return fmt.Errorf("同步间隔 %d 秒不合法，应在 %d-%d 秒之间（填 0 表示用默认的 %d 秒）",
+			req.SyncIntervalSec, store.MinCDTSyncIntervalSec,
+			store.MaxCDTSyncIntervalSec, store.DefaultCDTSyncIntervalSec)
 	}
 
 	if err := validateClock(req.AutoStartTime, "定时开机时间"); err != nil {
@@ -149,6 +161,7 @@ func (req *cdtAccountRequest) applyTo(a *store.CDTAccount) {
 	a.AutoStartTime = strings.TrimSpace(req.AutoStartTime)
 	a.AutoStopTime = strings.TrimSpace(req.AutoStopTime)
 	a.ScheduleTZ = req.ScheduleTZ
+	a.SyncIntervalSec = req.SyncIntervalSec
 	a.Enabled = req.Enabled
 }
 

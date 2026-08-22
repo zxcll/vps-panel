@@ -32,6 +32,7 @@ const AccountEditor = {
             threshold_percent: a?.threshold_percent ?? 95,
             outstanding_threshold: a?.outstanding_threshold ?? 0,
             shutdown_mode: a?.shutdown_mode || "StopCharging",
+            sync_interval_sec: a?.sync_interval_sec || 300,
             keep_alive: a?.keep_alive ?? false,
             auto_start_time: a?.auto_start_time || "",
             auto_stop_time: a?.auto_stop_time || "",
@@ -55,6 +56,7 @@ const AccountEditor = {
                 quota_overseas_gb: Number(form.quota_overseas_gb) || 0,
                 threshold_percent: Number(form.threshold_percent) || 0,
                 outstanding_threshold: Number(form.outstanding_threshold) || 0,
+                sync_interval_sec: Number(form.sync_interval_sec) || 0,
             };
             try {
                 if (isEdit.value) {
@@ -161,6 +163,21 @@ const AccountEditor = {
                 </select>
                 <div class="field-hint">
                     {{ (CDT_SHUTDOWN_MODES.find(m => m.value === form.shutdown_mode) || {}).hint }}
+                </div>
+            </div>
+
+            <div class="field">
+                <label>同步间隔（秒）</label>
+                <input type="number" min="10" max="86400" step="10" v-model="form.sync_interval_sec">
+                <div class="field-hint">
+                    多久去阿里云查一次。<b>CDT 流量、余额账单、实例状态、抢占式实例保活</b>都按它走，
+                    默认 300 秒。<br>
+                    设短一点主要是让<b>保活更快</b>——实例被回收后最多隔这么久就会被拉起来。
+                    流量数字不会因此更实时：阿里云的 CDT 统计本身就有小时级延迟，
+                    查得再勤也是同一个值。<br>
+                    每轮要打三四次阿里云接口，别设得太小，免得撞上人家的调用频率限制。<br>
+                    <b>定时开关机不受影响</b>，它固定一分钟看一次——那是按钟点触发的，
+                    间隔拉长会直接错过时间点。
                 </div>
             </div>
 
@@ -379,7 +396,8 @@ export const CDTView = {
                         </div>
                         <div class="node-meta">
                             账期 {{ a.cycle }} ·
-                            上次同步 {{ fmtTime(a.last_sync_at, true) }} ·
+                            上次同步 {{ fmtTime(a.last_sync_at, true) }}
+                            （每 {{ a.sync_interval_sec || 300 }} 秒一次） ·
                             实例 {{ a.instances.length }} 台（受守护 {{ a.guarded_count }}）
                             <template v-if="a.keep_alive"> · 保活已开</template>
                             <template v-if="a.auto_start_time || a.auto_stop_time">

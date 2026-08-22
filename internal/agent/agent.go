@@ -27,7 +27,7 @@ import (
 )
 
 // Version 是探针版本，上报给面板用于提示升级。
-const Version = "1.3.2"
+const Version = "1.4.0"
 
 type Config struct {
 	// Server 是面板地址，支持 wss:// ws:// https:// http:// 四种写法。
@@ -354,6 +354,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.log.Info("流量统计口径已确定",
 			"网卡", s.Iface, "当前累计入站", s.Rx, "当前累计出站", s.Tx, "boot_id", s.BootID)
 	}
+
+	// 上次升级要是在下载途中被杀（机器重启、OOM、systemd stop），
+	// 二进制目录里会留下半截的临时文件。启动时清一次 —— 这会儿不可能有
+	// 正在进行的升级，留在那儿的都是孤儿，不清就会越堆越多。
+	cleanupUpgradeLeftovers(a.log)
 
 	// 转发要在连上面板之前就恢复起来：探针重启期间内核里的规则其实还在转发，
 	// 但用户态监听器是随进程没的，早一秒恢复就少一秒不通。

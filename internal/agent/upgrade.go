@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -51,6 +52,10 @@ const upgradeExitDelay = 1500 * time.Millisecond
 // 再怎么也有几 MB；比这还小的一定不是它（多半是错误页面）。
 const minAgentBinarySize = 2 << 20
 
+// tmpBinaryPrefix 是下载中的临时文件前缀。开头的点让它在 ls 里不碍眼，
+// 也方便 cleanupUpgradeLeftovers 认出哪些是自己留下的。
+const tmpBinaryPrefix = ".vps-agent-new-"
+
 // upgrade 执行一次自升级。
 func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) protocol.CommandResult {
 	if req == nil {
@@ -78,6 +83,9 @@ func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) proto
 
 	a.log.Warn("收到面板下发的升级指令", "当前版本", Version, "目标版本", req.Version, "二进制", exePath)
 
+	// 先把上次可能留下的半截文件清掉，别让反复失败的升级把磁盘堆满。
+	cleanupUpgradeLeftovers(a.log)
+
 	tmpPath, size, err := a.downloadAgentBinary(ctx, exePath)
 	if err != nil {
 		return upgradeFailed(res, err)
@@ -90,7 +98,7 @@ func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) proto
 	if err := verifyAgentBinary(ctx, tmpPath); err != nil {
 		return upgradeFailed(res, err)
 	}
-	if err := swapBinary(tmpPath, exePath); err != nil {
+	if err := swapBinary(tmpPath, exePath, a.log); err != nil {
 		return upgradeFailed(res, err)
 	}
 
@@ -167,7 +175,7 @@ func (a *Agent) downloadAgentBinary(ctx context.Context, exePath string) (string
 	}
 
 	dir := filepath.Dir(exePath)
-	tmp, err := os.CreateTemp(dir, ".vps-agent-new-*")
+	tmp, err := os.CreateTemp(dir, tmpBinaryPrefix+"*")
 	if err != nil {
 		return "", 0, fmt.Errorf("在 %s 下创建临时文件失败: %w（这个目录可写吗？探针是以 root 跑的吗？）", dir, err)
 	}
@@ -256,19 +264,67 @@ func verifyAgentBinary(ctx context.Context, path string) error {
 // `mv vps-agent.old vps-agent` 就能立刻回滚，不用重新跑安装脚本、
 // 更不用在一台已经连不上面板的机器上想办法联网。
 //
+// **只留一份。** 每次升级前先把上一份删掉，所以升多少次都只多占一个
+// 二进制的空间（约 7MB），不会随升级次数越堆越多。
+//
 // 注意用 rename 而不是覆盖写：Linux 不允许写一个正在执行的文件
 // （ETXTBSY），但允许 rename 掉它 —— 老的 inode 会一直活到进程退出。
-func swapBinary(tmpPath, exePath string) error {
+func swapBinary(tmpPath, exePath string, log *slog.Logger) error {
 	backup := exePath + ".old"
-	// 备份失败不致命：升级本身还是能做的，只是没了回滚的便利。
+	// 先删掉上一次的备份，再把当前这份链过去。
+	// 用硬链接而不是复制：链接不额外占空间，等下面 rename 把原名挪走之后，
+	// 那个 inode 就靠 .old 这个名字继续活着，正好是我们要的。
 	_ = os.Remove(backup)
-	_ = os.Link(exePath, backup)
+	if err := os.Link(exePath, backup); err != nil && log != nil {
+		// 备份失败不致命，升级照做，只是少了本地回滚的便利。
+		log.Warn("留旧版本备份失败，升级继续但没有本地回滚点", "备份路径", backup, "err", err)
+	}
 
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		return fmt.Errorf("替换探针二进制失败: %w（%s 可写吗？探针是以 root 跑的吗？）",
 			err, filepath.Dir(exePath))
 	}
 	return nil
+}
+
+// cleanupUpgradeLeftovers 清掉上次升级留下的垃圾。
+//
+// 要清的是下载到一半的临时文件（.vps-agent-new-*）。正常路径上它们要么被
+// rename 成正式二进制、要么在失败时被删掉；但**进程在下载中途被杀**
+// （机器重启、OOM、systemd stop）就没人收拾了，反复几次就会在
+// /usr/local/bin 下堆出一串七八兆的碎片。
+//
+// 探针启动时和每次升级前各调一次。启动时调是安全的：这时候不可能有
+// 正在进行的升级，凡是留在那儿的临时文件都是孤儿。
+func cleanupUpgradeLeftovers(log *slog.Logger) {
+	exePath, err := currentBinaryPath()
+	if err != nil {
+		return
+	}
+	cleanupTempFilesIn(filepath.Dir(exePath), log)
+}
+
+// cleanupTempFilesIn 清掉某个目录下所有升级临时文件。拆出来是为了能单测。
+func cleanupTempFilesIn(dir string, log *slog.Logger) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), tmpBinaryPrefix) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if err := os.Remove(p); err != nil {
+			if log != nil {
+				log.Debug("清理升级残留失败", "文件", p, "err", err)
+			}
+			continue
+		}
+		if log != nil {
+			log.Info("清掉了上次升级留下的临时文件", "文件", p)
+		}
+	}
 }
 
 func upgradeOK(res protocol.UpgradeResult) protocol.CommandResult {

@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS cdt_accounts (
     -- 抢占式实例售罄只在第一次告警，避免每分钟刷一条。
     nostock_notified      INTEGER NOT NULL DEFAULT 0,
 
+    -- 多久去阿里云查一次（秒）。流量、账单、实例状态、抢占式保活都按它走。
+    -- 老库里没有这一列，由 store.addMissingColumns 补上 —— SQLite 的
+    -- ADD COLUMN 没有 IF NOT EXISTS，写进迁移文件会让第二次启动直接失败。
+    sync_interval_sec     INTEGER NOT NULL DEFAULT 300,
+
     last_sync_at          INTEGER NOT NULL DEFAULT 0,
     last_error            TEXT    NOT NULL DEFAULT '',
     enabled               INTEGER NOT NULL DEFAULT 1,

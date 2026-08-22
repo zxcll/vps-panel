@@ -150,7 +150,7 @@ func TestSwapBinaryKeepsBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := swapBinary(tmpPath, exePath); err != nil {
+	if err := swapBinary(tmpPath, exePath, nil); err != nil {
 		t.Fatalf("替换失败: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestSwapBinaryTwice(t *testing.T) {
 	for _, v := range []string{"v2", "v3"} {
 		tmp := filepath.Join(dir, ".new-"+v)
 		os.WriteFile(tmp, []byte(v), 0o755)
-		if err := swapBinary(tmp, exePath); err != nil {
+		if err := swapBinary(tmp, exePath, nil); err != nil {
 			t.Fatalf("升到 %s 失败: %v", v, err)
 		}
 	}
@@ -203,5 +203,74 @@ func TestUpgradeRefusedWhenDisabled(t *testing.T) {
 	}
 	if !strings.Contains(res.Error, "allow-upgrade") {
 		t.Errorf("错误消息应指出是哪个开关关着，实际：%s", res.Error)
+	}
+}
+
+// 升级不能让磁盘越用越多。
+//
+// 用户提的：升级要清掉老版本残留。现有实现里 .old 是每次覆盖的，只有一份；
+// 真正会堆积的是**下载到一半被杀**留下的临时文件 —— 机器重启、OOM、
+// systemd stop 都会造成这种孤儿，反复几次就是一串七八兆的碎片。
+func TestCleanupRemovesOrphanTempFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// 造几个上次升级留下的半截文件。
+	orphans := []string{
+		tmpBinaryPrefix + "123456",
+		tmpBinaryPrefix + "abcdef",
+	}
+	for _, name := range orphans {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("下了一半"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 这些不该被碰。
+	keep := []string{"vps-agent", "vps-agent.old", "别的程序"}
+	for _, name := range keep {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cleanupTempFilesIn(dir, nil)
+
+	for _, name := range orphans {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("残留文件 %s 没被清掉", name)
+		}
+	}
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("不该动的文件 %s 被删了: %v", name, err)
+		}
+	}
+}
+
+// .old 只留一份：升多少次都只多占一个二进制的空间。
+func TestBackupNeverAccumulates(t *testing.T) {
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "vps-agent")
+	os.WriteFile(exePath, []byte("v1"), 0o755)
+
+	for _, v := range []string{"v2", "v3", "v4", "v5"} {
+		tmp := filepath.Join(dir, tmpBinaryPrefix+v)
+		os.WriteFile(tmp, []byte(v), 0o755)
+		if err := swapBinary(tmp, exePath, nil); err != nil {
+			t.Fatalf("升到 %s 失败: %v", v, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	// 升了四次，目录里应该只剩当前二进制和一份 .old。
+	if len(names) != 2 {
+		t.Errorf("升级四次后目录里有 %d 个文件（应为 2 个：当前 + 一份 .old）：%v",
+			len(names), names)
 	}
 }

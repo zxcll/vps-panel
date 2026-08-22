@@ -54,7 +54,7 @@ func main() {
 	}
 }
 
-const version = "1.3.2"
+const version = "1.4.0"
 
 func newLogger(level string) *slog.Logger {
 	var lv slog.Level

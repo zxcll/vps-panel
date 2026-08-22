@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,20 +14,21 @@ import (
 	"github.com/zxcll/vps-panel/internal/store"
 )
 
-// 各档子任务的周期。
+// 调度参数。
 //
-// 分档而不是一律一分钟，是因为它们的代价和急迫程度差很多：
-// 保活和定时开关机要一分钟粒度（实例被回收了得赶紧拉起来、定点要准），
-// 流量和账单十分钟一次就够（阿里云那边本来也不是实时的），
-// 实例列表两分钟一次（主要是给界面看的）。
+// 「多久去阿里云查一次」是**每个账号自己配的**（cdt_accounts.sync_interval_sec，
+// 默认 300 秒）。流量、账单、实例状态、抢占式实例保活都按那个间隔走 ——
+// 它们本来就是同一轮里能一起做完的事，分成好几档只会让「我到底多久查一次」
+// 变得说不清。
+//
+// 只有定时开关机例外，固定一分钟看一次：它是按墙上时钟的 HH:MM 触发的，
+// 检查间隔一拉长就会直接错过那个时间点。
 const (
-	cdtTickInterval     = 30 * time.Second
-	cdtKeepAliveEvery   = 1 * time.Minute
-	cdtScheduleEvery    = 1 * time.Minute
-	cdtInstanceEvery    = 2 * time.Minute
-	cdtTrafficEvery     = 10 * time.Minute
-	cdtDailyReportHour  = 0
-	cdtCredentialErrTTL = 30 * time.Minute
+	// cdtTickInterval 是调度器自己的心跳。它只负责看看有没有账号到点了，
+	// 不直接决定查询频率，所以取一个比最小间隔更细的值。
+	cdtTickInterval    = 5 * time.Second
+	cdtScheduleEvery   = 1 * time.Minute
+	cdtDailyReportHour = 0
 )
 
 // cdtGuard 保证同一个账号同时只有一条会改变机器状态的动作在跑。
@@ -38,7 +40,8 @@ type cdtGuard struct {
 	mu      sync.Mutex
 	working map[int64]bool
 
-	// lastRun 记每档子任务上次跑的时间，用来在 30 秒的 tick 上做分频。
+	// lastRun 记每个调度单元上次跑的时间。键是账号 ID 转成的字符串，
+	// 或者 "schedule" 这种全局任务名。
 	lastRun map[string]time.Time
 	// lastReportDay 防止每日汇报在同一天里发第二遍。
 	lastReportDay string
@@ -104,9 +107,8 @@ func (s *Server) cdtTick(ctx context.Context) {
 	}
 
 	now := time.Now()
-	trafficDue := s.cdtDue("traffic", cdtTrafficEvery, now)
-	instanceDue := s.cdtDue("instances", cdtInstanceEvery, now)
-	keepAliveDue := s.cdtDue("keepalive", cdtKeepAliveEvery, now)
+	// 定时开关机是全局一分钟一次的：它按墙上时钟的 HH:MM 触发，
+	// 跟着账号的同步间隔走会直接错过时间点。
 	scheduleDue := s.cdtDue("schedule", cdtScheduleEvery, now)
 
 	for _, a := range accounts {
@@ -114,21 +116,21 @@ func (s *Server) cdtTick(ctx context.Context) {
 			continue
 		}
 		// 账期翻页优先于一切：新的一个月额度重置了，被熔断停掉的机器
-		// 该先恢复，再谈别的。
+		// 该先恢复，再谈别的。这一步只读本地状态，不打阿里云接口，
+		// 所以不受同步间隔限制。
 		s.cdtRollCycle(ctx, a)
 
-		if trafficDue {
-			s.cdtCheckTraffic(ctx, a)
-		}
-		if instanceDue {
-			s.cdtSyncInstances(ctx, a)
-		}
 		if scheduleDue {
 			s.cdtRunSchedule(ctx, a)
 		}
-		if keepAliveDue {
-			s.cdtKeepAlive(ctx, a)
+
+		// 到点了才去查阿里云。间隔由这个账号自己配。
+		if !s.cdtDue(strconv.FormatInt(a.ID, 10), a.SyncInterval(), now) {
+			continue
 		}
+		s.cdtCheckTraffic(ctx, a)
+		s.cdtSyncInstances(ctx, a)
+		s.cdtKeepAlive(ctx, a)
 	}
 
 	s.cdtDailyReport(ctx, now)

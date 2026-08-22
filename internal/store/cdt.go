@@ -12,7 +12,7 @@ import (
 const cdtAccountColumns = `id, name, access_key_id, region_id, site_type,
 	quota_mainland_gb, quota_overseas_gb, threshold_percent, outstanding_threshold,
 	shutdown_mode, keep_alive, auto_start_time, auto_stop_time, schedule_tz,
-	tripped_at, tripped_reason, tripped_cycle, nostock_notified,
+	sync_interval_sec, tripped_at, tripped_reason, tripped_cycle, nostock_notified,
 	last_sync_at, last_error, enabled, created_at, updated_at`
 
 func (s *Store) ListCDTAccounts(ctx context.Context) ([]*CDTAccount, error) {
@@ -65,12 +65,12 @@ func (s *Store) CreateCDTAccount(ctx context.Context, a *CDTAccount, credEnc []b
 		`INSERT INTO cdt_accounts (name, access_key_id, cred_enc, region_id, site_type,
 			quota_mainland_gb, quota_overseas_gb, threshold_percent, outstanding_threshold,
 			shutdown_mode, keep_alive, auto_start_time, auto_stop_time, schedule_tz,
-			enabled, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			sync_interval_sec, enabled, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.Name, a.AccessKeyID, credEnc, a.RegionID, a.SiteType,
 		a.QuotaMainlandGB, a.QuotaOverseasGB, a.ThresholdPercent, a.OutstandingThreshold,
 		a.ShutdownMode, boolInt(a.KeepAlive), a.AutoStartTime, a.AutoStopTime, a.ScheduleTZ,
-		boolInt(a.Enabled), timeVal(now), timeVal(now))
+		a.SyncIntervalSec, boolInt(a.Enabled), timeVal(now), timeVal(now))
 	if err != nil {
 		return err
 	}
@@ -87,12 +87,12 @@ func (s *Store) UpdateCDTAccount(ctx context.Context, a *CDTAccount, credEnc []b
 	query := `UPDATE cdt_accounts SET name=?, access_key_id=?, region_id=?, site_type=?,
 			quota_mainland_gb=?, quota_overseas_gb=?, threshold_percent=?, outstanding_threshold=?,
 			shutdown_mode=?, keep_alive=?, auto_start_time=?, auto_stop_time=?, schedule_tz=?,
-			enabled=?, updated_at=?`
+			sync_interval_sec=?, enabled=?, updated_at=?`
 	args := []any{
 		a.Name, a.AccessKeyID, a.RegionID, a.SiteType,
 		a.QuotaMainlandGB, a.QuotaOverseasGB, a.ThresholdPercent, a.OutstandingThreshold,
 		a.ShutdownMode, boolInt(a.KeepAlive), a.AutoStartTime, a.AutoStopTime, a.ScheduleTZ,
-		boolInt(a.Enabled), timeVal(now),
+		a.SyncIntervalSec, boolInt(a.Enabled), timeVal(now),
 	}
 	if credEnc != nil {
 		query += `, cred_enc=?`
@@ -160,7 +160,7 @@ func scanCDTAccount(sc interface{ Scan(...any) error }) (*CDTAccount, error) {
 	if err := sc.Scan(&a.ID, &a.Name, &a.AccessKeyID, &a.RegionID, &a.SiteType,
 		&a.QuotaMainlandGB, &a.QuotaOverseasGB, &a.ThresholdPercent, &a.OutstandingThreshold,
 		&a.ShutdownMode, &keepAlive, &a.AutoStartTime, &a.AutoStopTime, &a.ScheduleTZ,
-		&trippedAt, &a.TrippedReason, &a.TrippedCycle, &nostock,
+		&a.SyncIntervalSec, &trippedAt, &a.TrippedReason, &a.TrippedCycle, &nostock,
 		&lastSync, &a.LastError, &enabled, &created, &updated); err != nil {
 		return nil, err
 	}

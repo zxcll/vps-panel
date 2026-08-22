@@ -320,6 +320,13 @@ type CDTAccount struct {
 	AutoStopTime  string `json:"auto_stop_time"`
 	ScheduleTZ    string `json:"schedule_tz"`
 
+	// SyncIntervalSec 是多久去阿里云查一次（秒）。流量、账单、实例状态、
+	// 抢占式实例保活全都按它走。0 表示用默认值。
+	//
+	// 定时开关机**不受它影响**：那个是按墙上时钟的 HH:MM 触发的，
+	// 检查间隔拉长会直接错过时间点，所以它固定一分钟看一次。
+	SyncIntervalSec int `json:"sync_interval_sec"`
+
 	// TrippedAt 非零表示这个账号已被面板熔断停机。
 	TrippedAt       time.Time `json:"tripped_at"`
 	TrippedReason   string    `json:"tripped_reason"`
@@ -335,6 +342,30 @@ type CDTAccount struct {
 
 // Tripped 判断这个账号当前是不是处于熔断停机状态。
 func (a *CDTAccount) Tripped() bool { return !a.TrippedAt.IsZero() }
+
+// CDT 同步间隔的默认值与边界。
+const (
+	DefaultCDTSyncIntervalSec = 300
+	// MinCDTSyncIntervalSec 是个防手滑的下限。每轮同步要打 3~4 次阿里云接口，
+	// 设成一两秒会很快撞上人家的调用频率限制，还会把账号的 API 配额吃光。
+	MinCDTSyncIntervalSec = 10
+	MaxCDTSyncIntervalSec = 86400
+)
+
+// SyncInterval 返回这个账号实际生效的同步间隔，顺手做边界兜底。
+func (a *CDTAccount) SyncInterval() time.Duration {
+	sec := a.SyncIntervalSec
+	if sec <= 0 {
+		sec = DefaultCDTSyncIntervalSec
+	}
+	if sec < MinCDTSyncIntervalSec {
+		sec = MinCDTSyncIntervalSec
+	}
+	if sec > MaxCDTSyncIntervalSec {
+		sec = MaxCDTSyncIntervalSec
+	}
+	return time.Duration(sec) * time.Second
+}
 
 // CDTInstance 是一台 ECS 实例的快照。
 type CDTInstance struct {

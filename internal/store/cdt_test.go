@@ -316,3 +316,61 @@ func TestDeleteCDTAccountCascades(t *testing.T) {
 		t.Error("账单没被级联删掉")
 	}
 }
+
+// sync_interval_sec 是后加的列。SQLite 的 ALTER TABLE ADD COLUMN 没有
+// IF NOT EXISTS，而这个项目的迁移每次启动全量重放 —— 直接写进 .sql 文件的话，
+// 第二次启动就会因为「列已存在」而报错，面板起不来（这个坑刚踩过一次）。
+//
+// 所以补列走的是 PRAGMA table_info 检查。这条用例反复开关库，确认它幂等。
+func TestAddMissingColumnsIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cdt.db")
+	ctx := context.Background()
+
+	st := openTestStore(t, path)
+	a := newCDTTestAccount(t, st, "账号")
+	// 明确设一个非默认值，确认反复重放不会把它冲掉。
+	a.SyncIntervalSec = 45
+	if err := st.UpdateCDTAccount(ctx, a, nil); err != nil {
+		t.Fatalf("设置同步间隔失败: %v", err)
+	}
+	st.Close()
+
+	for i := range 3 {
+		again, err := Open(path)
+		if err != nil {
+			t.Fatalf("第 %d 次重开失败（面板起不来就是这个错）: %v", i+1, err)
+		}
+		got, err := again.GetCDTAccount(ctx, a.ID)
+		if err != nil {
+			again.Close()
+			t.Fatalf("第 %d 次重开后读账号失败: %v", i+1, err)
+		}
+		if got.SyncIntervalSec != 45 {
+			again.Close()
+			t.Fatalf("第 %d 次重开后同步间隔变成了 %d，应保持 45", i+1, got.SyncIntervalSec)
+		}
+		again.Close()
+	}
+}
+
+// 间隔的边界兜底：0 用默认值，太小/太大都夹回合理范围。
+// 这段直接决定去阿里云的请求频率，设成 0 会变成每 5 秒打一次接口。
+func TestSyncIntervalClamps(t *testing.T) {
+	cases := []struct {
+		set  int
+		want time.Duration
+	}{
+		{0, DefaultCDTSyncIntervalSec * time.Second},
+		{-5, DefaultCDTSyncIntervalSec * time.Second},
+		{300, 300 * time.Second},
+		{45, 45 * time.Second},
+		{1, MinCDTSyncIntervalSec * time.Second},
+		{999999, MaxCDTSyncIntervalSec * time.Second},
+	}
+	for _, tc := range cases {
+		a := &CDTAccount{SyncIntervalSec: tc.set}
+		if got := a.SyncInterval(); got != tc.want {
+			t.Errorf("SyncIntervalSec=%d → %v，期望 %v", tc.set, got, tc.want)
+		}
+	}
+}
