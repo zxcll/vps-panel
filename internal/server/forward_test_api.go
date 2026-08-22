@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/zxcll/vps-panel/internal/action"
 	"github.com/zxcll/vps-panel/internal/forward"
@@ -15,9 +14,6 @@ import (
 	"github.com/zxcll/vps-panel/internal/protocol"
 	"github.com/zxcll/vps-panel/internal/store"
 )
-
-// panelDialTimeout 是面板自己拨入口地址的超时。
-const panelDialTimeout = 6 * time.Second
 
 // forwardTestReport 是一次链路测试的完整结果。
 //
@@ -29,17 +25,22 @@ type forwardTestReport struct {
 	RuleName string `json:"rule_name"`
 	OK       bool   `json:"ok"`
 	// Summary 是一句话结论，前端直接显示。
-	Summary string `json:"summary"`
-	// Entry 是面板自己拨入口地址的结果，可能为 nil（规则没有可用入口地址）。
-	Entry *forwardTestLeg  `json:"entry,omitempty"`
-	Legs  []forwardTestLeg `json:"legs"`
+	Summary string           `json:"summary"`
+	Legs    []forwardTestLeg `json:"legs"`
 }
 
-// forwardTestLeg 是链路上的一段。
+// forwardTestLeg 是链路上相邻两点之间的一段。
+//
+// 测的一律是**相邻**的两跳（第 1 跳拨第 2 跳、第 2 跳拨第 3 跳…，
+// 最后一跳才拨落地目标），不是每一跳都去拨落地目标 ——
+// 那样测不出中间哪一段断了，而这恰恰是多跳链路最需要知道的事。
 type forwardTestLeg struct {
-	// Position 从 0 开始，-1 表示这是「面板 → 入口」那一段。
-	Position  int    `json:"position"`
-	From      string `json:"from"`
+	// Position 是发起方在链路里的位置，从 0 开始。
+	Position int `json:"position"`
+	// From / To 是这一段的两端，已经带上「第几跳」的说法，前端直接显示。
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Target 是实际拨的地址。
 	Target    string `json:"target"`
 	OK        bool   `json:"ok"`
 	LatencyMS int    `json:"latency_ms"`
@@ -110,15 +111,14 @@ func (s *Server) testForwardRule(ctx context.Context, rule *store.ForwardRule) (
 
 	report := &forwardTestReport{RuleID: rule.ID, RuleName: rule.Name, Legs: []forwardTestLeg{}}
 
-	// 逐跳测：让每台机器去拨它自己的下一跳。
-	for i, p := range placed {
-		nodeName := "节点"
-		if n := nodes[p.NodeID]; n != nil {
-			nodeName = n.Name
-		}
+	// 逐段测：每台机器去拨它自己的**下一跳**，最后一跳才拨落地目标。
+	// 面板自己不参与拨号 —— 面板到入口的网络路径和客户端的未必相同，
+	// 测出来的结果说明不了问题，只会误导。
+	for _, p := range placed {
 		leg := forwardTestLeg{
-			Position: i,
-			From:     nodeName,
+			Position: p.Position,
+			From:     hopLabel(p.Position, nodes[p.NodeID]),
+			To:       legDestLabel(p, nodes, rule),
 			Target:   legTarget(p.Rule),
 		}
 
@@ -133,12 +133,6 @@ func (s *Server) testForwardRule(ctx context.Context, rule *store.ForwardRule) (
 			leg.Diagnosis = diagnose(probe, p.Rule)
 		}
 		report.Legs = append(report.Legs, leg)
-	}
-
-	// 面板自己也拨一次入口。它和用户的网络路径未必相同，所以只作参考，
-	// 不参与整体结论 —— 面板常常部署在内网，拨不通不代表用户拨不通。
-	if entry := forwardplan.EntryAddress(rule, nodes, fwdNodes); entry != "" {
-		report.Entry = s.dialFromPanel(ctx, entry)
 	}
 
 	report.OK, report.Summary = summarize(rule, report)
@@ -171,20 +165,25 @@ func (s *Server) probeFromNode(ctx context.Context, nodeID int64, target string,
 	return &probe, nil
 }
 
-// dialFromPanel 面板自己拨一次地址。
-func (s *Server) dialFromPanel(ctx context.Context, target string) *forwardTestLeg {
-	leg := &forwardTestLeg{Position: -1, From: "面板", Target: target}
-	start := time.Now()
-	d := net.Dialer{Timeout: panelDialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", target)
-	leg.LatencyMS = int(time.Since(start).Milliseconds())
-	if err != nil {
-		leg.Error = err.Error()
-		return leg
+// hopLabel 把一跳描述成「入口（节点名）」或「第 N 跳（节点名）」。
+func hopLabel(position int, n *store.Node) string {
+	name := "节点"
+	if n != nil {
+		name = n.Name
 	}
-	conn.Close()
-	leg.OK = true
-	return leg
+	if position == 0 {
+		return fmt.Sprintf("入口（%s）", name)
+	}
+	return fmt.Sprintf("第 %d 跳（%s）", position+1, name)
+}
+
+// legDestLabel 描述这一段拨向哪里。NextNodeID 为 0 说明这已经是最后一跳，
+// 拨的是落地目标而不是链路上的下一台机器。
+func legDestLabel(p forwardplan.Placed, nodes map[int64]*store.Node, rule *store.ForwardRule) string {
+	if p.NextNodeID == 0 {
+		return fmt.Sprintf("落地目标（%s:%d）", rule.DestHost, rule.DestPort)
+	}
+	return hopLabel(p.Position+1, nodes[p.NextNodeID])
 }
 
 // legTarget 取一条展开后规则的目标地址。
@@ -247,22 +246,24 @@ func summarize(rule *store.ForwardRule, rep *forwardTestReport) (bool, string) {
 		if leg.OK {
 			continue
 		}
-		who := fmt.Sprintf("第 %d 跳（%s）", leg.Position+1, leg.From)
 		reason := leg.Error
 		if leg.Diagnosis != nil && len(leg.Diagnosis.Problems) > 0 {
 			reason = strings.Join(leg.Diagnosis.Problems, " ")
 		}
 		if reason == "" {
-			reason = "连不上下一跳"
+			reason = "连不上"
 		}
-		return false, fmt.Sprintf("链路在%s断了：%s", who, reason)
+		return false, fmt.Sprintf("%s → %s 这一段不通：%s", leg.From, leg.To, reason)
 	}
 
-	msg := fmt.Sprintf("链路全通，共 %d 跳。", len(rep.Legs))
-	if rep.Entry != nil && !rep.Entry.OK {
-		// 面板拨不通但每一跳都通，最常见的原因是云厂商的安全组没放行入口端口。
-		msg += "不过面板自己拨入口地址没成功——如果客户端也连不上，多半是云服务商的" +
-			"安全组/防火墙没放行入口端口（这一层在机器外面，探针改不了）。"
+	entries := 0
+	for _, leg := range rep.Legs {
+		if leg.Position == 0 {
+			entries++
+		}
 	}
-	return true, msg
+	if entries > 1 {
+		return true, fmt.Sprintf("全部 %d 个入口都通，链路每一段都正常。", entries)
+	}
+	return true, "链路每一段都正常。"
 }

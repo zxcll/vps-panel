@@ -7,6 +7,11 @@
 //	最后一跳的目标 = 规则里填的最终目标
 //	入口地址      = 第 0 跳所在节点的中继地址 : 第 0 跳的监听端口
 //
+// 一个 position 上可以有**多台**机器，但只允许入口（position 0）这样：
+// 几台机器共用同一个入口端口，一起加进域名记录的候选列表，域名故障切换
+// 切到哪一台转发都还通。中间跳必须是唯一的一台 —— 链路中段一旦分叉，
+// 「上一跳该往哪发」就没有定义了。
+//
 // 下发单位是**节点**而不是规则：一台机器上可能同时有好几条规则的跳，
 // 必须合成一份完整规则集整体下发。nftables 本来就是删表重建，
 // 全量语义天然幂等，探针重连、面板重启、漏了一条指令都能靠下一次下发自愈。
@@ -95,7 +100,44 @@ func Build(in Inputs) Plan {
 // Placed 是一条落在具体节点上的转发规则。
 type Placed struct {
 	NodeID int64
-	Rule   forward.Rule
+	// Position 是这一跳在链路里的位置，0 即入口。多入口时会有多条
+	// Placed 共用 Position 0。
+	Position int
+	// NextNodeID 是这一跳把流量交给谁。0 表示它已经是最后一跳，
+	// 直接拨落地目标。链路测试靠它描述「这一段是从哪到哪」。
+	NextNodeID int64
+	Rule       forward.Rule
+}
+
+// stage 是同一个 position 上的全部跳。只有入口那个 stage 允许有多条。
+type stage struct {
+	position int
+	hops     []store.ForwardHop
+}
+
+// groupByPosition 把跳按 position 归拢成有序的 stage 列表。
+//
+// 数据库里的行序不该被信任，一律按 position 排；stage 内部按 NodeID 排，
+// 保证同样的配置每次展开出同样的顺序（下发内容要能靠比对判断有没有变）。
+func groupByPosition(hops []store.ForwardHop) []stage {
+	byPos := map[int][]store.ForwardHop{}
+	for _, h := range hops {
+		byPos[h.Position] = append(byPos[h.Position], h)
+	}
+
+	positions := make([]int, 0, len(byPos))
+	for p := range byPos {
+		positions = append(positions, p)
+	}
+	sort.Ints(positions)
+
+	out := make([]stage, 0, len(positions))
+	for _, p := range positions {
+		group := byPos[p]
+		sort.Slice(group, func(i, j int) bool { return group[i].NodeID < group[j].NodeID })
+		out = append(out, stage{position: p, hops: group})
+	}
+	return out
 }
 
 // Expand 把一条规则展开成每一跳的转发规则。
@@ -104,39 +146,39 @@ func Expand(r *store.ForwardRule, nodes map[int64]*store.Node, fwdNodes map[int6
 		return nil, fmt.Errorf("规则没有配置任何节点")
 	}
 
-	hops := append([]store.ForwardHop(nil), r.Hops...)
-	sort.Slice(hops, func(i, j int) bool { return hops[i].Position < hops[j].Position })
+	stages := groupByPosition(r.Hops)
+
+	// 中间跳分叉的话，上一跳该往哪发就没有定义了。只有入口可以是多台机器。
+	for i, st := range stages {
+		if i > 0 && len(st.hops) > 1 {
+			return nil, fmt.Errorf("只有入口可以配多个节点，第 %d 跳配了 %d 个", i+1, len(st.hops))
+		}
+	}
 
 	// 同一个节点在一条链里出现两次几乎一定是配错了：那意味着流量绕回自己，
 	// 而且「按 (规则, 节点) 定位一跳」这个前提也不成立了。
 	seen := map[int64]bool{}
-	for _, h := range hops {
-		if seen[h.NodeID] {
-			name := nodeName(nodes, h.NodeID)
-			return nil, fmt.Errorf("节点「%s」在这条链里出现了两次", name)
+	for _, st := range stages {
+		for _, h := range st.hops {
+			if seen[h.NodeID] {
+				name := nodeName(nodes, h.NodeID)
+				return nil, fmt.Errorf("节点「%s」在这条链里出现了两次", name)
+			}
+			seen[h.NodeID] = true
 		}
-		seen[h.NodeID] = true
 	}
 
-	out := make([]Placed, 0, len(hops))
-	for i, h := range hops {
-		node := nodes[h.NodeID]
-		if node == nil {
-			return nil, fmt.Errorf("第 %d 跳指向的节点已不存在", i+1)
-		}
-		if !node.Enabled {
-			return nil, fmt.Errorf("第 %d 跳的节点「%s」已被禁用", i+1, node.Name)
-		}
-		if fn := fwdNodeOf(fwdNodes, h.NodeID); !fn.Enabled {
-			return nil, fmt.Errorf("节点「%s」关闭了端口转发", node.Name)
-		}
-
+	out := make([]Placed, 0, len(r.Hops))
+	for i, st := range stages {
+		// 这一跳交给谁：最后一个 stage 直接拨落地目标，否则拨下一个 stage
+		// 那唯一一台机器。同一 stage 里的多个入口共用同一个下一跳。
 		var destHost string
 		var destPort int
-		if i == len(hops)-1 {
+		var nextNodeID int64
+		if i == len(stages)-1 {
 			destHost, destPort = r.DestHost, r.DestPort
 		} else {
-			next := hops[i+1]
+			next := stages[i+1].hops[0]
 			// 先确认下一跳的节点还在。少了这一步，节点被删掉时报出来的是
 			// 「没有可用的中继地址」，指向完全错误的排查方向。
 			nextNode := nodes[next.NodeID]
@@ -147,32 +189,59 @@ func Expand(r *store.ForwardRule, nodes map[int64]*store.Node, fwdNodes map[int6
 			if relay == "" {
 				return nil, fmt.Errorf("节点「%s」没有可用的中继地址，请在转发设置里填写", nextNode.Name)
 			}
-			destHost, destPort = relay, next.ListenPort
+			destHost, destPort, nextNodeID = relay, next.ListenPort, next.NodeID
 		}
 
-		rule := forward.Rule{
-			HopID:         h.ID,
-			Proto:         r.Proto,
-			ListenPort:    h.ListenPort,
-			DestPort:      destPort,
-			Mode:          h.Mode,
-			BandwidthMbps: h.BandwidthMbps,
-			Label:         fmt.Sprintf("%s 第%d跳", r.Name, i+1),
-		}
-		// 是 IP 就直接填 DestIP，是域名才交给探针去解析。
-		// 中间跳的中继地址通常是 IP，能省掉一次没必要的 DNS 查询。
-		if net.ParseIP(destHost) != nil {
-			rule.DestIP = destHost
-		} else {
-			rule.DestHost = destHost
-		}
+		for _, h := range st.hops {
+			node := nodes[h.NodeID]
+			if node == nil {
+				return nil, fmt.Errorf("第 %d 跳指向的节点已不存在", i+1)
+			}
+			if !node.Enabled {
+				return nil, fmt.Errorf("第 %d 跳的节点「%s」已被禁用", i+1, node.Name)
+			}
+			if fn := fwdNodeOf(fwdNodes, h.NodeID); !fn.Enabled {
+				return nil, fmt.Errorf("节点「%s」关闭了端口转发", node.Name)
+			}
 
-		if err := forward.Validate(rule); err != nil {
-			return nil, fmt.Errorf("第 %d 跳不合法: %w", i+1, err)
+			rule := forward.Rule{
+				HopID:         h.ID,
+				Proto:         r.Proto,
+				ListenPort:    h.ListenPort,
+				DestPort:      destPort,
+				Mode:          h.Mode,
+				BandwidthMbps: h.BandwidthMbps,
+				Label:         hopDisplayLabel(r.Name, i, len(st.hops) > 1, node.Name),
+			}
+			// 是 IP 就直接填 DestIP，是域名才交给探针去解析。
+			// 中间跳的中继地址通常是 IP，能省掉一次没必要的 DNS 查询。
+			if net.ParseIP(destHost) != nil {
+				rule.DestIP = destHost
+			} else {
+				rule.DestHost = destHost
+			}
+
+			if err := forward.Validate(rule); err != nil {
+				return nil, fmt.Errorf("第 %d 跳不合法: %w", i+1, err)
+			}
+			out = append(out, Placed{
+				NodeID:     h.NodeID,
+				Position:   st.position,
+				NextNodeID: nextNodeID,
+				Rule:       rule,
+			})
 		}
-		out = append(out, Placed{NodeID: h.NodeID, Rule: rule})
 	}
 	return out, nil
+}
+
+// hopDisplayLabel 生成 nft 注释和日志里的那行描述。
+// 多入口时带上机器名，否则两个入口在日志里长得一模一样，没法区分。
+func hopDisplayLabel(ruleName string, index int, shared bool, nodeName string) string {
+	if shared {
+		return fmt.Sprintf("%s 第%d跳(%s)", ruleName, index+1, nodeName)
+	}
+	return fmt.Sprintf("%s 第%d跳", ruleName, index+1)
 }
 
 // RelayHost 返回其他节点访问这个节点用的地址。
@@ -193,22 +262,41 @@ func RelayHost(fn *store.ForwardNode, n *store.Node) string {
 	return n.SSHHost
 }
 
-// EntryAddress 返回一条规则的入口地址，也就是用户该往哪里连。
-func EntryAddress(r *store.ForwardRule, nodes map[int64]*store.Node, fwdNodes map[int64]*store.ForwardNode) string {
-	if len(r.Hops) == 0 {
-		return ""
+// Entry 是一条规则的一个入口，也就是用户可以往哪里连。
+type Entry struct {
+	NodeID   int64  `json:"node_id"`
+	NodeName string `json:"node_name"`
+	// Address 是 host:port 形式，前端直接给复制按钮。
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+}
+
+// Entries 返回一条规则的全部入口。
+//
+// 多个入口共用同一个端口，配合域名故障切换用：把这几台一起加进域名记录的
+// 候选列表，域名切到哪一台，客户端连的地址端口都不用改。
+//
+// 拿不到中继地址的入口会被跳过 —— 那台机器根本没法被连上，列出来只会误导。
+func Entries(r *store.ForwardRule, nodes map[int64]*store.Node, fwdNodes map[int64]*store.ForwardNode) []Entry {
+	stages := groupByPosition(r.Hops)
+	if len(stages) == 0 {
+		return []Entry{}
 	}
-	first := r.Hops[0]
-	for _, h := range r.Hops {
-		if h.Position < first.Position {
-			first = h
+
+	out := make([]Entry, 0, len(stages[0].hops))
+	for _, h := range stages[0].hops {
+		host := RelayHost(fwdNodeOf(fwdNodes, h.NodeID), nodes[h.NodeID])
+		if host == "" {
+			continue
 		}
+		out = append(out, Entry{
+			NodeID:   h.NodeID,
+			NodeName: nodeName(nodes, h.NodeID),
+			Address:  net.JoinHostPort(host, fmt.Sprintf("%d", h.ListenPort)),
+			Port:     h.ListenPort,
+		})
 	}
-	host := RelayHost(fwdNodeOf(fwdNodes, first.NodeID), nodes[first.NodeID])
-	if host == "" {
-		return ""
-	}
-	return net.JoinHostPort(host, fmt.Sprintf("%d", first.ListenPort))
+	return out
 }
 
 // randIntn 做成变量是为了测试能固定住随机性。
@@ -227,11 +315,60 @@ const allocRandomTries = 16
 // 但这里一律避开：中间端口没必要精打细算，撞在一起只会让
 // 「这个端口到底是谁的」变得难查。
 func AllocPort(fn *store.ForwardNode, used map[int]string) (int, error) {
-	start, end := fn.PortStart, fn.PortEnd
-	if start <= 0 || end <= 0 || start > end {
-		start, end = store.DefaultForwardPortStart, store.DefaultForwardPortEnd
+	start, end := portRangeOf(fn)
+	return allocInRange(start, end, used)
+}
+
+// AllocSharedPort 挑一个在这一跳的**每台**机器上都空闲的端口。
+//
+// 多个入口必须共用同一个端口：端口不一样的话，域名故障切换一切到另一台，
+// 客户端就得改配置，那这个功能也就没意义了。
+//
+// 做法是先求各节点端口范围的交集，再把各自的占用并起来，然后照常挑。
+// fns 和 used 按下标一一对应。
+func AllocSharedPort(fns []*store.ForwardNode, used []map[int]string) (int, error) {
+	if len(fns) == 0 {
+		return 0, fmt.Errorf("没有可分配端口的节点")
+	}
+	if len(fns) != len(used) {
+		return 0, fmt.Errorf("节点数 %d 与占用表数 %d 对不上", len(fns), len(used))
 	}
 
+	// 交集：起点取最大、终点取最小。
+	start, end := portRangeOf(fns[0])
+	for _, fn := range fns[1:] {
+		s, e := portRangeOf(fn)
+		start = max(start, s)
+		end = min(end, e)
+	}
+	if start > end {
+		return 0, fmt.Errorf("这几台入口机器配置的端口范围没有交集，"+
+			"请在节点的转发设置里把它们调成有重叠的范围（当前交集为 %d-%d）", start, end)
+	}
+
+	merged := map[int]string{}
+	for _, u := range used {
+		for port, proto := range u {
+			merged[port] = proto
+		}
+	}
+	return allocInRange(start, end, merged)
+}
+
+// portRangeOf 取节点配置的端口范围，没配过或配得不合法时回落默认范围。
+func portRangeOf(fn *store.ForwardNode) (int, int) {
+	if fn == nil {
+		return store.DefaultForwardPortStart, store.DefaultForwardPortEnd
+	}
+	start, end := fn.PortStart, fn.PortEnd
+	if start <= 0 || end <= 0 || start > end {
+		return store.DefaultForwardPortStart, store.DefaultForwardPortEnd
+	}
+	return start, end
+}
+
+// allocInRange 在 [start, end] 里挑一个不在 used 里的端口。
+func allocInRange(start, end int, used map[int]string) (int, error) {
 	span := end - start + 1
 	for range allocRandomTries {
 		p := start + randIntn(span)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -222,15 +223,39 @@ func (s *Store) SetForwardRuleEnabled(ctx context.Context, id int64, enabled boo
 	return affected(res)
 }
 
+// checkHopPositions 确认调用方填的 position 是一组说得通的值。
+//
+// position 由调用方决定而不是这里按下标编号 —— 入口可以有多台机器，
+// 它们共用 position 0，按下标编号会把第二个入口挤到 position 1 上，
+// 悄悄退化成一条串行链路。既然不能自动编号，就得在这里挡住写坏的值：
+// 必须非负，且去重之后正好构成 0..N-1 的连续区间。
+func checkHopPositions(hops []ForwardHop) error {
+	distinct := map[int]bool{}
+	for _, h := range hops {
+		if h.Position < 0 {
+			return fmt.Errorf("跳的 position 不能是负数（node_id=%d, position=%d）", h.NodeID, h.Position)
+		}
+		distinct[h.Position] = true
+	}
+	for p := range len(distinct) {
+		if !distinct[p] {
+			return fmt.Errorf("跳的 position 不连续：缺了 %d（共 %d 个位置）", p, len(distinct))
+		}
+	}
+	return nil
+}
+
 // replaceHops 删掉规则现有的跳再按 r.Hops 重建，并把生成的 ID 写回 r.Hops。
 func replaceHops(ctx context.Context, tx *Tx, r *ForwardRule) error {
+	if err := checkHopPositions(r.Hops); err != nil {
+		return err
+	}
 	if _, err := tx.tx.ExecContext(ctx, `DELETE FROM forward_hops WHERE rule_id = ?`, r.ID); err != nil {
 		return err
 	}
 	for i := range r.Hops {
 		h := &r.Hops[i]
 		h.RuleID = r.ID
-		h.Position = i
 		// proto 从规则冗余下来，保证唯一索引按协议区分坑位。
 		h.Proto = r.Proto
 		res, err := tx.tx.ExecContext(ctx,
@@ -251,18 +276,20 @@ func replaceHops(ctx context.Context, tx *Tx, r *ForwardRule) error {
 
 const forwardHopColumns = "h.id, h.rule_id, h.position, h.node_id, h.listen_port, h.proto, h.mode, h.bandwidth_mbps"
 
+// 排序一律带上 node_id 兜底：入口可以有多台机器共用一个 position，
+// 只按 position 排的话它们之间的顺序是不确定的，页面上会来回跳。
 func (s *Store) allForwardHops(ctx context.Context) ([]ForwardHop, error) {
 	return s.queryHops(ctx,
 		`SELECT `+forwardHopColumns+`, COALESCE(n.name, '')
 		 FROM forward_hops h LEFT JOIN nodes n ON n.id = h.node_id
-		 ORDER BY h.rule_id, h.position`)
+		 ORDER BY h.rule_id, h.position, h.node_id`)
 }
 
 func (s *Store) forwardHopsOf(ctx context.Context, ruleID int64) ([]ForwardHop, error) {
 	return s.queryHops(ctx,
 		`SELECT `+forwardHopColumns+`, COALESCE(n.name, '')
 		 FROM forward_hops h LEFT JOIN nodes n ON n.id = h.node_id
-		 WHERE h.rule_id = ? ORDER BY h.position`, ruleID)
+		 WHERE h.rule_id = ? ORDER BY h.position, h.node_id`, ruleID)
 }
 
 // ForwardHopsOnNode 列出某个节点上的所有跳，用于下发该节点的完整规则集。

@@ -285,23 +285,56 @@ SECRET2=$(api GET "/api/nodes/$NID2/install" | jq -r .secret)
 
 FWD=$(api POST /api/forwards "{\"name\":\"验收转发\",\"proto\":\"tcp\",
   \"dest_host\":\"1.2.3.4\",\"dest_port\":443,\"enabled\":true,
-  \"hops\":[{\"node_id\":$NID2,\"listen_port\":18443,\"mode\":\"kernel\"}]}")
+  \"hops\":[{\"node_ids\":[$NID2],\"listen_port\":18443,\"mode\":\"kernel\"}]}")
 HOP=$(echo "$FWD" | jq -r '.hops[0].id')
 FWD_ID=$(echo "$FWD" | jq -r '.id')
 [ -n "$HOP" ] && [ "$HOP" != "null" ] && pass "转发规则已创建（hop_id=$HOP）" || fail "转发规则创建失败：$FWD"
 
 AUTO=$(api POST /api/forwards "{\"name\":\"自动端口\",\"proto\":\"tcp\",
   \"dest_host\":\"1.1.1.1\",\"dest_port\":443,\"enabled\":false,
-  \"hops\":[{\"node_id\":$NID2,\"listen_port\":0,\"mode\":\"kernel\"}]}" | jq -r '.hops[0].listen_port')
+  \"hops\":[{\"node_ids\":[$NID2],\"listen_port\":0,\"mode\":\"kernel\"}]}" | jq -r '.hops[0].listen_port')
 if [ "$AUTO" -ge 20000 ] && [ "$AUTO" -le 29999 ]; then
     pass "监听端口留空时从节点端口范围内自动分配（分到 $AUTO）"
 else
     fail "自动分配的端口 $AUTO 不在 20000-29999 范围内"
 fi
 
-ENTRY=$(api GET /api/forwards | jq -r '.[] | select(.id == '"$FWD_ID"') | .entry_address')
+ENTRY=$(api GET /api/forwards | jq -r '.[] | select(.id == '"$FWD_ID"') | .entries[0].address')
 [ "$ENTRY" = "203.0.113.9:18443" ] && pass "入口地址推导正确（$ENTRY）" \
     || fail "入口地址错了：$ENTRY"
+
+# 多入口：两台机器共用一个入口端口，配合域名故障切换用 ——
+# 域名切到哪一台，客户端连的地址端口都不用改。
+MULTI=$(api POST /api/forwards "{\"name\":\"双入口\",\"proto\":\"tcp\",
+  \"dest_host\":\"1.2.3.4\",\"dest_port\":443,\"enabled\":false,
+  \"hops\":[{\"node_ids\":[$NID,$NID2],\"listen_port\":0,\"mode\":\"kernel\"}]}")
+MULTI_ID=$(echo "$MULTI" | jq -r '.id')
+MULTI_PORTS=$(echo "$MULTI" | jq -r '[.hops[].listen_port] | unique | length')
+MULTI_POS=$(echo "$MULTI" | jq -r '[.hops[] | select(.position == 0)] | length')
+if [ "$MULTI_POS" = "2" ] && [ "$MULTI_PORTS" = "1" ]; then
+    pass "多入口：两台机器都落在 position 0 且共用同一个监听端口"
+else
+    fail "多入口不对：position 0 有 $MULTI_POS 行，用了 $MULTI_PORTS 个不同端口"
+fi
+
+MULTI_ENTRIES=$(api GET /api/forwards | jq -r '.[] | select(.id == '"$MULTI_ID"') | .entries | length')
+[ "$MULTI_ENTRIES" = "2" ] && pass "多入口规则列出了两个可连地址" \
+    || fail "多入口只列出了 $MULTI_ENTRIES 个地址"
+
+# 中间跳分叉没有定义（上一跳该往哪发？），必须被挡下来。
+# 这里要读 4xx 的响应体，所以不能用带 -f 的 api()。
+BAD=$(curl -sS -X POST "$BASE/api/forwards" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"中间跳分叉\",\"proto\":\"tcp\",
+      \"dest_host\":\"1.2.3.4\",\"dest_port\":443,\"enabled\":false,
+      \"hops\":[{\"node_ids\":[$NID],\"listen_port\":0,\"mode\":\"kernel\"},
+                {\"node_ids\":[$NID,$NID2],\"listen_port\":0,\"mode\":\"kernel\"}]}")
+case "$BAD" in
+    *"只有入口可以配多个节点"*) pass "中间跳配多个节点被拒绝" ;;
+    *) fail "中间跳分叉没有被拒绝：$BAD" ;;
+esac
+
+api DELETE "/api/forwards/$MULTI_ID" >/dev/null
 
 # 中转 1GB 上行 + 3GB 下行。网卡上进出各走一遍，所以 rx 和 tx 各涨 4GB。
 fwd_report "$SECRET2" '{"boot_id":"fb1","iface":"eth0","rx":0,"tx":0,

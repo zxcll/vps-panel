@@ -21,23 +21,35 @@ const ForwardEditor = {
         });
 
         // 跳序在本地是一个普通数组，顺序即链路顺序，保存时按下标写 position。
-        const hops = ref(
-            (props.rule?.hops || []).map((h) => ({
-                node_id: h.node_id,
-                listen_port: h.listen_port,
-                mode: h.mode || "kernel",
-                bandwidth_mbps: h.bandwidth_mbps || 0,
-            })),
-        );
+        // 后端按「一个节点一行」存，同一 position 的多行是同一跳的多个入口。
+        // 这里按 position 归拢成一跳一项，跳内保存节点列表。
+        const hops = ref(regroup(props.rule?.hops || []));
+
+        function regroup(rows) {
+            const byPos = new Map();
+            for (const h of rows) {
+                const g = byPos.get(h.position);
+                if (g) {
+                    g.node_ids.push(h.node_id);
+                    continue;
+                }
+                byPos.set(h.position, {
+                    node_ids: [h.node_id],
+                    listen_port: h.listen_port,
+                    mode: h.mode || "kernel",
+                    bandwidth_mbps: h.bandwidth_mbps || 0,
+                });
+            }
+            return [...byPos.keys()].sort((a, b) => a - b).map((k) => byPos.get(k));
+        }
 
         const saving = ref(false);
         const err = ref("");
         const addSelect = ref("");
 
         // 一个节点在同一条链里只能出现一次，所以下拉里要把已选的排掉。
-        const available = computed(() =>
-            (props.nodes || []).filter((n) => !hops.value.some((h) => h.node_id === n.id)),
-        );
+        const used = computed(() => new Set(hops.value.flatMap((h) => h.node_ids)));
+        const available = computed(() => (props.nodes || []).filter((n) => !used.value.has(n.id)));
 
         function nodeName(id) {
             const n = (props.nodes || []).find((x) => x.id === id);
@@ -47,13 +59,30 @@ const ForwardEditor = {
         function addHop(id) {
             if (!id) return;
             hops.value.push({
-                node_id: Number(id),
-                // 一律默认 0：由面板从该节点配置的端口范围里随机挑一个。
+                node_ids: [Number(id)],
+                // 一律默认 0：由面板从节点配置的端口范围里随机挑一个。
                 // 想指定入口端口（比如客户端配置里已经写死了）就自己改成具体数字。
                 listen_port: 0,
                 mode: "kernel",
                 bandwidth_mbps: 0,
             });
+        }
+
+        // 给入口再加一台机器。多个入口共用同一个监听端口，
+        // 这样域名故障切换切到哪台，客户端都不用改配置。
+        function addEntryNode(id) {
+            if (!id || !hops.value.length) return;
+            hops.value[0].node_ids.push(Number(id));
+        }
+
+        function removeEntryNode(i) {
+            const entry = hops.value[0];
+            if (entry.node_ids.length <= 1) {
+                // 最后一个入口节点连同这一跳一起删掉，否则会留下一个空跳。
+                hops.value.splice(0, 1);
+                return;
+            }
+            entry.node_ids.splice(i, 1);
         }
 
         function removeHop(i) {
@@ -91,7 +120,7 @@ const ForwardEditor = {
                 enabled: form.enabled,
                 remark: form.remark,
                 hops: hops.value.map((h) => ({
-                    node_id: Number(h.node_id),
+                    node_ids: h.node_ids.map(Number),
                     listen_port: Number(h.listen_port) || 0,
                     mode: h.mode,
                     bandwidth_mbps: Number(h.bandwidth_mbps) || 0,
@@ -114,10 +143,12 @@ const ForwardEditor = {
             () => form.name.trim() && form.dest_host.trim() && form.dest_port && hops.value.length > 0,
         );
 
+        const entryAdd = ref("");
+
         return {
-            form, hops, saving, err, save, isEdit, available, addSelect,
-            addHop, removeHop, move, nodeName, canSave, onProtoChange,
-            FORWARD_MODES, FORWARD_PROTOCOLS,
+            form, hops, saving, err, save, isEdit, available, addSelect, entryAdd,
+            addHop, addEntryNode, removeEntryNode, removeHop, move, nodeName,
+            canSave, onProtoChange, FORWARD_MODES, FORWARD_PROTOCOLS,
         };
     },
     template: `
@@ -174,9 +205,21 @@ const ForwardEditor = {
                             </tr>
                         </thead>
                         <tbody>
-                            <tr v-for="(h, i) in hops" :key="h.node_id">
-                                <td class="tabular">{{ i === 0 ? '入口' : i + 1 }}</td>
-                                <td>{{ nodeName(h.node_id) }}</td>
+                            <tr v-for="(h, i) in hops" :key="i">
+                                <td class="tabular">{{ i === 0 ? '入口' : '第 ' + (i + 1) + ' 跳' }}</td>
+                                <td>
+                                    <template v-if="i === 0">
+                                        <div v-for="(nid, k) in h.node_ids" :key="nid" class="btn-row" style="margin-bottom:4px">
+                                            <span style="flex:1">{{ nodeName(nid) }}</span>
+                                            <button class="btn small danger" @click="removeEntryNode(k)">移除</button>
+                                        </div>
+                                        <select v-model="entryAdd" @change="addEntryNode(entryAdd); entryAdd = ''">
+                                            <option value="">＋ 再加一个入口…</option>
+                                            <option v-for="n in available" :key="n.id" :value="n.id">{{ n.name }}</option>
+                                        </select>
+                                    </template>
+                                    <template v-else>{{ nodeName(h.node_ids[0]) }}</template>
+                                </td>
                                 <td>
                                     <input type="number" min="0" max="65535" v-model="h.listen_port"
                                            placeholder="0 = 自动分配">
@@ -194,9 +237,9 @@ const ForwardEditor = {
                                 </td>
                                 <td>
                                     <div class="btn-row">
-                                        <button class="btn small" :disabled="i === 0" @click="move(i, -1)">上移</button>
-                                        <button class="btn small" :disabled="i === hops.length - 1" @click="move(i, 1)">下移</button>
-                                        <button class="btn small danger" @click="removeHop(i)">移除</button>
+                                        <button class="btn small" :disabled="i === 0 || h.node_ids.length > 1" @click="move(i, -1)">上移</button>
+                                        <button class="btn small" :disabled="i === hops.length - 1 || h.node_ids.length > 1" @click="move(i, 1)">下移</button>
+                                        <button class="btn small danger" @click="removeHop(i)">删掉这跳</button>
                                     </div>
                                 </td>
                             </tr>
@@ -206,12 +249,15 @@ const ForwardEditor = {
                 <div class="field-row" style="margin-top:12px">
                     <div class="field" style="margin-bottom:0">
                         <select v-model="addSelect" @change="addHop(addSelect); addSelect = ''">
-                            <option value="">＋ 添加一跳…</option>
+                            <option value="">{{ hops.length ? '＋ 再加一个中转跳…' : '＋ 先选一台入口机器…' }}</option>
                             <option v-for="n in available" :key="n.id" :value="n.id">{{ n.name }}</option>
                         </select>
                         <div class="field-hint">
-                            <b>监听端口</b>填 0（默认）就由面板从该节点「转发设置」里配的端口范围内随机挑一个；
-                            客户端配置里已经写死了某个端口的话，填具体数字。<br>
+                            <b>多个入口</b>：入口那一行可以加好几台机器，它们共用同一个监听端口。
+                            把这几台一起加进「域名切换」的候选列表，域名切到哪一台转发都还通，
+                            客户端也不用改端口。中间的中转跳只能有一台机器。<br>
+                            <b>监听端口</b>填 0（默认）就由面板从节点「转发设置」里配的端口范围内随机挑一个
+                            （多入口时会挑一个在这几台上都空闲的）；客户端配置里已经写死了某个端口的话，填具体数字。<br>
                             <b>内核态</b>：包在内核里改个目标地址就直接转走，不经过任何用户进程，
                             开销最低、速度最快，TCP/UDP 都支持。默认用它。<br>
                             <b>用户态</b>：探针自己收下连接、再单独建一条到下一跳的连接。
@@ -344,15 +390,15 @@ const ForwardTestResult = {
             <table>
                 <thead>
                     <tr>
-                        <th style="width:150px">从哪里发起</th>
-                        <th>拨向</th>
-                        <th style="width:110px">结果</th>
+                        <th>这一段</th>
+                        <th style="width:200px">实际拨的地址</th>
+                        <th style="width:100px">结果</th>
                         <th style="width:90px">耗时</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr v-for="leg in report.legs" :key="leg.position">
-                        <td>第 {{ leg.position + 1 }} 跳<div class="node-meta">{{ leg.from }}</div></td>
+                    <tr v-for="(leg, i) in report.legs" :key="i">
+                        <td>{{ leg.from }} → {{ leg.to }}</td>
                         <td class="mono">{{ leg.target || '—' }}</td>
                         <td>
                             <span class="badge" :class="leg.ok ? 'good' : 'critical'">
@@ -361,24 +407,19 @@ const ForwardTestResult = {
                         </td>
                         <td class="tabular">{{ leg.latency_ms }} ms</td>
                     </tr>
-                    <tr v-if="report.entry">
-                        <td>面板 → 入口<div class="node-meta">仅供参考</div></td>
-                        <td class="mono">{{ report.entry.target }}</td>
-                        <td>
-                            <span class="badge" :class="report.entry.ok ? 'good' : 'warning'">
-                                <span class="dot"></span>{{ report.entry.ok ? '通' : '不通' }}
-                            </span>
-                        </td>
-                        <td class="tabular">{{ report.entry.latency_ms }} ms</td>
-                    </tr>
                 </tbody>
             </table>
         </div>
+        <div class="field-hint" style="margin-top:8px">
+            测的是链路上<b>相邻两点</b>之间的连通性（入口拨第 2 跳、第 2 跳拨第 3 跳…，
+            最后一跳才拨落地目标），这样才能看出是哪一段断了。
+            有多个入口时每个入口各测一段。
+        </div>
 
-        <template v-for="leg in report.legs" :key="'d' + leg.position">
+        <template v-for="(leg, i) in report.legs" :key="'d' + i">
             <div v-if="leg.error || (leg.diagnosis && leg.diagnosis.problems && leg.diagnosis.problems.length)"
                  class="notice error" style="margin-top:14px">
-                <b>第 {{ leg.position + 1 }} 跳（{{ leg.from }}）</b>
+                <b>{{ leg.from }} → {{ leg.to }}</b>
                 <div v-if="leg.error" style="margin-top:6px">拨号失败：{{ leg.error }}</div>
                 <div v-for="(pb, i) in (leg.diagnosis ? leg.diagnosis.problems : [])" :key="i" style="margin-top:6px">
                     {{ pb }}
@@ -398,7 +439,7 @@ const ForwardTestResult = {
                         </tr>
                     </thead>
                     <tbody>
-                        <tr v-for="leg in report.legs.filter(l => l.diagnosis)" :key="'x' + leg.position">
+                        <tr v-for="(leg, i) in report.legs.filter(l => l.diagnosis)" :key="'x' + i">
                             <td>{{ leg.from }}</td>
                             <td>{{ leg.diagnosis.nft_available ? '可用' : '缺失' }}</td>
                             <td>{{ leg.diagnosis.ip_forward ? '已开启' : '未开启' }}</td>
@@ -599,12 +640,16 @@ export const ForwardView = {
                                     </div>
                                 </td>
                                 <td>
-                                    <span v-if="r.entry_address" class="mono">{{ r.entry_address }}</span>
-                                    <span v-else class="muted">入口节点没有可用地址</span>
+                                    <div v-for="e in (r.entries || [])" :key="e.node_id" class="mono">
+                                        {{ e.address }}
+                                        <span class="node-meta">{{ e.node_name }}</span>
+                                    </div>
+                                    <span v-if="!(r.entries || []).length" class="muted">入口节点没有可用地址</span>
                                 </td>
                                 <td>
-                                    <div v-for="(h, i) in r.hop_views" :key="h.id" class="node-meta">
-                                        {{ i + 1 }}. {{ h.node_name }}:{{ h.listen_port }}
+                                    <div v-for="h in r.hop_views" :key="h.id" class="node-meta">
+                                        {{ h.position === 0 ? '入口' : '第' + (h.position + 1) + '跳' }}
+                                        {{ h.node_name }}:{{ h.listen_port }}
                                         <span class="badge" :class="h.node_online ? 'good' : 'critical'">
                                             <span class="dot"></span>{{ h.node_online ? '在线' : '离线' }}
                                         </span>
@@ -625,7 +670,8 @@ export const ForwardView = {
                                         <button class="btn small" :disabled="testing === r.id" @click="runTest(r)">
                                             <span v-if="testing === r.id" class="spinner"></span>测试
                                         </button>
-                                        <button class="btn small" :disabled="!r.entry_address" @click="copy(r.entry_address)">复制入口</button>
+                                        <button class="btn small" :disabled="!(r.entries || []).length"
+                                                @click="copy((r.entries || []).map(e => e.address).join('\n'))">复制入口</button>
                                         <button class="btn small" :disabled="busy === r.id" @click="toggle(r)">
                                             {{ r.enabled ? '停用' : '启用' }}
                                         </button>

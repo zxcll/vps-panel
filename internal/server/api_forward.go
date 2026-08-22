@@ -18,12 +18,13 @@ import (
 
 type forwardRuleView struct {
 	*store.ForwardRule
-	// EntryAddress 是用户该往哪里连，前端直接给复制按钮。
-	EntryAddress string           `json:"entry_address"`
-	ProtoLabel   string           `json:"proto_label"`
-	HopViews     []forwardHopView `json:"hop_views"`
-	TotalUp      int64            `json:"total_up"`
-	TotalDown    int64            `json:"total_down"`
+	// Entries 是用户可以连的全部入口。多入口时前端逐个列出来，
+	// 每个都能复制 —— 它们共用同一个端口，配合域名切换用。
+	Entries    []forwardplan.Entry `json:"entries"`
+	ProtoLabel string              `json:"proto_label"`
+	HopViews   []forwardHopView    `json:"hop_views"`
+	TotalUp    int64               `json:"total_up"`
+	TotalDown  int64               `json:"total_down"`
 	// Problem 非空表示这条规则展开不了，没有真正生效。
 	Problem string `json:"problem,omitempty"`
 }
@@ -74,9 +75,14 @@ func forwardModeLabel(m string) string {
 // --- 请求 ---
 
 type forwardHopRequest struct {
-	NodeID int64 `json:"node_id"`
-	// ListenPort 为 0 表示让面板自动分配（只允许非首跳这么做：
-	// 入口端口是用户要往里连的，必须由他自己定）。
+	// NodeIDs 是这一跳落在哪些机器上。
+	//
+	// 只有入口（第一跳）允许填多个：把几台机器都设成入口，再一起加进
+	// 域名记录的候选列表，域名切到哪一台转发都还通。中间跳必须只有一个 ——
+	// 链路中段如果分叉，上一跳该往哪发就没有定义了。
+	NodeIDs []int64 `json:"node_ids"`
+	// ListenPort 为 0 表示让面板从节点配置的端口范围里随机挑一个。
+	// 多个入口共用这一个端口 —— 端口不一样的话，域名一切换客户端就连不上了。
 	ListenPort    int    `json:"listen_port"`
 	Mode          string `json:"mode"`
 	BandwidthMbps int    `json:"bandwidth_mbps"`
@@ -126,15 +132,23 @@ func (req *forwardRequest) validate() error {
 	seen := map[int64]bool{}
 	for i := range req.Hops {
 		h := &req.Hops[i]
-		if h.NodeID <= 0 {
+		if len(h.NodeIDs) == 0 {
 			return fmt.Errorf("第 %d 跳没有选择节点", i+1)
 		}
-		if seen[h.NodeID] {
-			return fmt.Errorf("同一个节点不能在链路里出现两次")
+		if i > 0 && len(h.NodeIDs) > 1 {
+			return fmt.Errorf("只有入口可以配多个节点，第 %d 跳配了 %d 个", i+1, len(h.NodeIDs))
 		}
-		seen[h.NodeID] = true
+		for _, id := range h.NodeIDs {
+			if id <= 0 {
+				return fmt.Errorf("第 %d 跳的节点 ID 不合法", i+1)
+			}
+			if seen[id] {
+				return fmt.Errorf("同一个节点不能在链路里出现两次")
+			}
+			seen[id] = true
+		}
 
-		// 0 表示让面板从该节点配置的端口范围里随机挑一个，入口跳也支持。
+		// 0 表示让面板从节点配置的端口范围里随机挑一个，入口跳也支持。
 		if h.ListenPort != 0 && (h.ListenPort < 1 || h.ListenPort > 65535) {
 			return fmt.Errorf("第 %d 跳的监听端口 %d 不合法，应在 1-65535 之间（填 0 表示自动分配）", i+1, h.ListenPort)
 		}
@@ -176,32 +190,49 @@ func (s *Server) applyForwardRequest(ctx context.Context, req *forwardRequest, r
 	for i, h := range req.Hops {
 		port := h.ListenPort
 		if port == 0 {
-			used, err := s.st.UsedForwardPorts(ctx, h.NodeID, r.ID)
-			if err != nil {
-				return fmt.Errorf("查询节点已占用端口: %w", err)
-			}
-			// 本次请求里用户手填的端口也要避开：库里还没有它们，
-			// 但保存时会一起写进去，撞上就会被唯一约束打回来。
-			for _, other := range req.Hops {
-				if other.NodeID == h.NodeID && other.ListenPort > 0 {
-					used[other.ListenPort] = "pending"
+			// 这一跳的所有节点共用一个端口，所以要挑一个在它们身上都空闲的。
+			fns := make([]*store.ForwardNode, 0, len(h.NodeIDs))
+			usedPerNode := make([]map[int]string, 0, len(h.NodeIDs))
+			for _, id := range h.NodeIDs {
+				used, err := s.st.UsedForwardPorts(ctx, id, r.ID)
+				if err != nil {
+					return fmt.Errorf("查询节点已占用端口: %w", err)
 				}
+				// 本次请求里用户手填的端口也要避开：库里还没有它们，
+				// 但保存时会一起写进去，撞上就会被唯一约束打回来。
+				for _, other := range req.Hops {
+					if other.ListenPort <= 0 {
+						continue
+					}
+					for _, oid := range other.NodeIDs {
+						if oid == id {
+							used[other.ListenPort] = "pending"
+						}
+					}
+				}
+				fn := fwdNodes[id]
+				if fn == nil {
+					fn = store.DefaultForwardNode(id)
+				}
+				fns = append(fns, fn)
+				usedPerNode = append(usedPerNode, used)
 			}
-			fn := fwdNodes[h.NodeID]
-			if fn == nil {
-				fn = store.DefaultForwardNode(h.NodeID)
-			}
-			port, err = forwardplan.AllocPort(fn, used)
+			var err error
+			port, err = forwardplan.AllocSharedPort(fns, usedPerNode)
 			if err != nil {
 				return fmt.Errorf("第 %d 跳自动分配端口失败: %w", i+1, err)
 			}
 		}
-		hops = append(hops, store.ForwardHop{
-			NodeID:        h.NodeID,
-			ListenPort:    port,
-			Mode:          h.Mode,
-			BandwidthMbps: h.BandwidthMbps,
-		})
+		// 同一跳的每个节点各写一行，共用位置、端口、模式和限速。
+		for _, id := range h.NodeIDs {
+			hops = append(hops, store.ForwardHop{
+				NodeID:        id,
+				Position:      i,
+				ListenPort:    port,
+				Mode:          h.Mode,
+				BandwidthMbps: h.BandwidthMbps,
+			})
+		}
 	}
 	r.Hops = hops
 	return nil
@@ -570,10 +601,10 @@ func (s *Server) forwardViews(ctx context.Context) ([]*forwardRuleView, error) {
 	out := make([]*forwardRuleView, 0, len(rules))
 	for _, rule := range rules {
 		v := &forwardRuleView{
-			ForwardRule:  rule,
-			EntryAddress: forwardplan.EntryAddress(rule, nodes, fwdNodes),
-			ProtoLabel:   forwardProtoLabel(rule.Proto),
-			Problem:      problems[rule.ID],
+			ForwardRule: rule,
+			Entries:     forwardplan.Entries(rule, nodes, fwdNodes),
+			ProtoLabel:  forwardProtoLabel(rule.Proto),
+			Problem:     problems[rule.ID],
 		}
 		for _, h := range rule.Hops {
 			hv := forwardHopView{
@@ -636,15 +667,17 @@ func (s *Server) checkForwardNodes(ctx context.Context, hops []forwardHopRequest
 		return err
 	}
 	for i, h := range hops {
-		n, err := s.st.GetNode(ctx, h.NodeID)
-		if err != nil {
-			return fmt.Errorf("第 %d 跳选择的节点不存在", i+1)
-		}
-		if !n.Enabled {
-			return fmt.Errorf("第 %d 跳选择的节点「%s」已被禁用", i+1, n.Name)
-		}
-		if fn := fwdNodes[h.NodeID]; fn != nil && !fn.Enabled {
-			return fmt.Errorf("节点「%s」关闭了端口转发，请先在转发设置里打开", n.Name)
+		for _, id := range h.NodeIDs {
+			n, err := s.st.GetNode(ctx, id)
+			if err != nil {
+				return fmt.Errorf("第 %d 跳选择的节点不存在", i+1)
+			}
+			if !n.Enabled {
+				return fmt.Errorf("第 %d 跳选择的节点「%s」已被禁用", i+1, n.Name)
+			}
+			if fn := fwdNodes[id]; fn != nil && !fn.Enabled {
+				return fmt.Errorf("节点「%s」关闭了端口转发，请先在转发设置里打开", n.Name)
+			}
 		}
 	}
 	return nil

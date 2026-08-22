@@ -105,6 +105,91 @@ func TestExpandSortsByPosition(t *testing.T) {
 	}
 }
 
+// 多入口展开：两个入口共用 position 0，各自独立监听、独立计数，
+// 但都把流量交给同一个第 2 跳。
+//
+// 这里守的是这次改动最关键的一条不变量：**没有任何一跳指向另一个入口**。
+// 旧实现按「一行一跳」排序后拿 hops[i+1] 当下一跳，两个入口会互相指向对方，
+// 流量在两台入口机之间来回打转。
+func TestExpandMultiEntry(t *testing.T) {
+	r := &store.ForwardRule{
+		ID: 10, Name: "多入口", Proto: store.ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []store.ForwardHop{
+			// 两个入口共用同一个监听端口：域名切到哪台，客户端都不用改配置。
+			{ID: 100, Position: 0, NodeID: 1, ListenPort: 8443, Mode: store.ForwardModeKernel},
+			{ID: 101, Position: 0, NodeID: 2, ListenPort: 8443, Mode: store.ForwardModeKernel},
+			{ID: 102, Position: 1, NodeID: 3, ListenPort: 20001, Mode: store.ForwardModeKernel},
+		},
+	}
+	got, err := Expand(r, testNodes(), testFwdNodes())
+	if err != nil {
+		t.Fatalf("展开失败: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("应展开出 3 条规则（2 个入口 + 1 个中转），实际 %d", len(got))
+	}
+
+	entries := map[int64]Placed{}
+	for _, p := range got {
+		if p.Position == 0 {
+			entries[p.NodeID] = p
+		}
+	}
+	if len(entries) != 2 {
+		t.Fatalf("position 0 应有 2 条，实际 %d", len(entries))
+	}
+
+	// 两个入口都指向第 2 跳（节点 3），而不是指向对方。
+	for id, p := range entries {
+		if p.NextNodeID != 3 {
+			t.Errorf("入口（节点 %d）的下一跳应是节点 3，实际 %d —— 指向另一个入口会让流量打转", id, p.NextNodeID)
+		}
+		if p.Rule.DestIP != "203.0.113.3" || p.Rule.DestPort != 20001 {
+			t.Errorf("入口（节点 %d）的目标应是 203.0.113.3:20001，实际 %s:%d",
+				id, p.Rule.DestIP, p.Rule.DestPort)
+		}
+	}
+
+	// 每个入口有各自的 HopID —— 转发账本按它索引，两台机器的流量得分开算。
+	if entries[1].Rule.HopID == entries[2].Rule.HopID {
+		t.Error("两个入口必须是不同的 HopID，否则转发账本会串账")
+	}
+
+	// 最后一跳指向落地目标，NextNodeID 为 0。
+	var last Placed
+	for _, p := range got {
+		if p.Position == 1 {
+			last = p
+		}
+	}
+	if last.NextNodeID != 0 || last.Rule.DestIP != "1.2.3.4" || last.Rule.DestPort != 443 {
+		t.Errorf("最后一跳应直接拨落地目标：%+v", last)
+	}
+}
+
+// 多入口时 nft 注释/日志里要能区分是哪台机器，否则两个入口长得一模一样。
+func TestExpandMultiEntryLabelsIncludeNodeName(t *testing.T) {
+	r := &store.ForwardRule{
+		ID: 10, Name: "多入口", Proto: store.ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []store.ForwardHop{
+			{ID: 100, Position: 0, NodeID: 1, ListenPort: 8443},
+			{ID: 101, Position: 0, NodeID: 2, ListenPort: 8443},
+		},
+	}
+	got, err := Expand(r, testNodes(), testFwdNodes())
+	if err != nil {
+		t.Fatalf("展开失败: %v", err)
+	}
+	if got[0].Rule.Label == got[1].Rule.Label {
+		t.Errorf("两个入口的 Label 不该一样，实际都是 %q", got[0].Rule.Label)
+	}
+	if !strings.Contains(got[0].Rule.Label, "上海A") {
+		t.Errorf("Label 里应带机器名，实际 %q", got[0].Rule.Label)
+	}
+}
+
 func TestExpandUsesExplicitRelayHost(t *testing.T) {
 	// 探测地址可能是内网口，中继必须用显式配的公网地址。
 	fn := testFwdNodes()
@@ -203,6 +288,16 @@ func TestExpandErrors(t *testing.T) {
 				r.Hops[1].NodeID = 1
 			},
 			"出现了两次",
+		},
+		{
+			// 中间跳分叉的话，上一跳该往哪发没有定义。只有入口能配多台。
+			"中间跳配了多个节点",
+			func(r *store.ForwardRule, _ map[int64]*store.Node, _ map[int64]*store.ForwardNode) {
+				r.Hops = append(r.Hops, store.ForwardHop{
+					ID: 102, Position: 1, NodeID: 3, ListenPort: 20002,
+				})
+			},
+			"只有入口可以配多个节点",
 		},
 		{
 			"跳本身不合法",
@@ -361,7 +456,7 @@ func TestBuildIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestEntryAddress(t *testing.T) {
+func TestEntries(t *testing.T) {
 	r := &store.ForwardRule{
 		ID: 1, Name: "规则", Proto: store.ForwardProtoTCP, DestHost: "1.2.3.4", DestPort: 443,
 		Hops: []store.ForwardHop{
@@ -370,8 +465,52 @@ func TestEntryAddress(t *testing.T) {
 			{ID: 100, Position: 0, NodeID: 1, ListenPort: 8443},
 		},
 	}
-	if got := EntryAddress(r, testNodes(), testFwdNodes()); got != "203.0.113.1:8443" {
-		t.Errorf("入口地址 = %q，期望 203.0.113.1:8443", got)
+	got := Entries(r, testNodes(), testFwdNodes())
+	if len(got) != 1 {
+		t.Fatalf("应有 1 个入口，实际 %d：%+v", len(got), got)
+	}
+	if got[0].Address != "203.0.113.1:8443" || got[0].NodeID != 1 || got[0].Port != 8443 {
+		t.Errorf("入口不对：%+v", got[0])
+	}
+	if got[0].NodeName != "上海A" {
+		t.Errorf("入口应带上机器名，实际 %q", got[0].NodeName)
+	}
+}
+
+// 多入口：两台机器共用 position 0 和同一个端口，前端要把两个都列出来。
+func TestEntriesMultiple(t *testing.T) {
+	r := &store.ForwardRule{
+		ID: 1, Name: "多入口", Proto: store.ForwardProtoTCP, DestHost: "1.2.3.4", DestPort: 443,
+		Hops: []store.ForwardHop{
+			{ID: 100, Position: 0, NodeID: 1, ListenPort: 8443},
+			{ID: 101, Position: 0, NodeID: 2, ListenPort: 8443},
+			{ID: 102, Position: 1, NodeID: 3, ListenPort: 20001},
+		},
+	}
+	got := Entries(r, testNodes(), testFwdNodes())
+	if len(got) != 2 {
+		t.Fatalf("应有 2 个入口，实际 %d：%+v", len(got), got)
+	}
+	if got[0].Address != "203.0.113.1:8443" || got[1].Address != "203.0.113.2:8443" {
+		t.Errorf("两个入口地址不对：%q / %q", got[0].Address, got[1].Address)
+	}
+}
+
+// 拿不到中继地址的入口不该列出来 —— 那台机器根本连不上，列出来只会误导。
+func TestEntriesSkipsNodeWithoutRelayHost(t *testing.T) {
+	nodes := testNodes()
+	nodes[1].IPv4, nodes[1].SSHHost = "", ""
+
+	r := &store.ForwardRule{
+		ID: 1, Name: "多入口", Proto: store.ForwardProtoTCP, DestHost: "1.2.3.4", DestPort: 443,
+		Hops: []store.ForwardHop{
+			{ID: 100, Position: 0, NodeID: 1, ListenPort: 8443},
+			{ID: 101, Position: 0, NodeID: 2, ListenPort: 8443},
+		},
+	}
+	got := Entries(r, nodes, testFwdNodes())
+	if len(got) != 1 || got[0].NodeID != 2 {
+		t.Fatalf("只应留下有地址的那个入口，实际 %+v", got)
 	}
 }
 
@@ -441,6 +580,90 @@ func TestAllocPortErrors(t *testing.T) {
 	}
 	if got < store.DefaultForwardPortStart || got > store.DefaultForwardPortEnd {
 		t.Errorf("回落后分到 %d，不在默认范围内", got)
+	}
+}
+
+// 多个入口必须共用同一个端口，所以挑的那个得在每台机器上都空闲。
+func TestAllocSharedPortAvoidsPortUsedOnAnyNode(t *testing.T) {
+	// 范围压到只剩两个坑位：30000 在 A 上被占，30001 在 B 上被占，
+	// 唯一能共用的只有 30002。
+	fns := []*store.ForwardNode{
+		{NodeID: 1, PortStart: 30000, PortEnd: 30002, Enabled: true},
+		{NodeID: 2, PortStart: 30000, PortEnd: 30002, Enabled: true},
+	}
+	used := []map[int]string{
+		{30000: "tcp"},
+		{30001: "tcp"},
+	}
+
+	got, err := AllocSharedPort(fns, used)
+	if err != nil {
+		t.Fatalf("分配失败: %v", err)
+	}
+	if got != 30002 {
+		t.Errorf("应分到两台机器上都空闲的 30002，实际 %d", got)
+	}
+}
+
+// 各节点的端口范围不一样时，要落在它们的交集里。
+func TestAllocSharedPortUsesRangeIntersection(t *testing.T) {
+	fns := []*store.ForwardNode{
+		{NodeID: 1, PortStart: 20000, PortEnd: 25000, Enabled: true},
+		{NodeID: 2, PortStart: 24000, PortEnd: 30000, Enabled: true},
+	}
+	used := []map[int]string{{}, {}}
+
+	for range 30 {
+		got, err := AllocSharedPort(fns, used)
+		if err != nil {
+			t.Fatalf("分配失败: %v", err)
+		}
+		if got < 24000 || got > 25000 {
+			t.Fatalf("分到 %d，不在交集 24000-25000 内", got)
+		}
+	}
+}
+
+func TestAllocSharedPortErrors(t *testing.T) {
+	// 范围完全不重叠：报错要说得清楚，让用户知道该去改哪里。
+	disjoint := []*store.ForwardNode{
+		{NodeID: 1, PortStart: 20000, PortEnd: 20999, Enabled: true},
+		{NodeID: 2, PortStart: 30000, PortEnd: 30999, Enabled: true},
+	}
+	_, err := AllocSharedPort(disjoint, []map[int]string{{}, {}})
+	if err == nil {
+		t.Fatal("范围没有交集时应报错")
+	}
+	if !strings.Contains(err.Error(), "没有交集") {
+		t.Errorf("错误消息应说明是范围没有交集，实际 %q", err.Error())
+	}
+
+	if _, err := AllocSharedPort(nil, nil); err == nil {
+		t.Error("没有节点时应报错")
+	}
+
+	// 交集里的坑位全被占了。
+	full := []*store.ForwardNode{
+		{NodeID: 1, PortStart: 30000, PortEnd: 30000, Enabled: true},
+		{NodeID: 2, PortStart: 30000, PortEnd: 30000, Enabled: true},
+	}
+	if _, err := AllocSharedPort(full, []map[int]string{{}, {30000: "tcp"}}); err == nil {
+		t.Error("交集用满时应报错")
+	}
+}
+
+// 单个节点时，AllocSharedPort 的行为必须和 AllocPort 一致。
+func TestAllocSharedPortSingleNodeMatchesAllocPort(t *testing.T) {
+	fn := &store.ForwardNode{NodeID: 1, PortStart: 30000, PortEnd: 30009, Enabled: true}
+	used := map[int]string{}
+	for p := 30000; p <= 30009; p++ {
+		used[p] = "tcp"
+	}
+	delete(used, 30004)
+
+	got, err := AllocSharedPort([]*store.ForwardNode{fn}, []map[int]string{used})
+	if err != nil || got != 30004 {
+		t.Errorf("应扫描出唯一空闲端口 30004，实际 %d, err=%v", got, err)
 	}
 }
 

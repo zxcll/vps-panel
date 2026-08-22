@@ -63,8 +63,8 @@ func TestForwardRuleCRUD(t *testing.T) {
 		Name: "香港中转", Proto: ForwardProtoTCP,
 		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
 		Hops: []ForwardHop{
-			{NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
-			{NodeID: b.ID, ListenPort: 9000, Mode: ForwardModeUserspace, BandwidthMbps: 50},
+			{Position: 0, NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 1, NodeID: b.ID, ListenPort: 9000, Mode: ForwardModeUserspace, BandwidthMbps: 50},
 		},
 	}
 	if err := st.CreateForwardRule(ctx, r); err != nil {
@@ -78,7 +78,7 @@ func TestForwardRuleCRUD(t *testing.T) {
 			t.Errorf("第 %d 跳应回填 ID", i)
 		}
 		if h.Position != i {
-			t.Errorf("第 %d 跳的 position = %d，应按切片顺序自动编号", i, h.Position)
+			t.Errorf("第 %d 跳的 position = %d，应原样保留调用方填的值", i, h.Position)
 		}
 		if h.Proto != ForwardProtoTCP {
 			t.Errorf("第 %d 跳的 proto 应从规则冗余下来，实际 %q", i, h.Proto)
@@ -117,6 +117,73 @@ func TestForwardRuleCRUD(t *testing.T) {
 	hops, _ := st.ForwardHopsOnNode(ctx, a.ID)
 	if len(hops) != 0 {
 		t.Errorf("删规则后跳应级联清掉，实际还剩 %d 条", len(hops))
+	}
+}
+
+// 一条规则可以有多个入口：它们共用 position 0，各自一行。
+// 唯一索引的键是 (rule_id, position, node_id)，所以同位置不同节点不冲突。
+func TestForwardRuleAllowsMultipleEntries(t *testing.T) {
+	st := newForwardTestStore(t)
+	ctx := context.Background()
+	a := newForwardTestNode(t, st, "入口A")
+	b := newForwardTestNode(t, st, "入口B")
+	c := newForwardTestNode(t, st, "落地C")
+
+	r := &ForwardRule{
+		Name: "多入口", Proto: ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []ForwardHop{
+			// 两个入口共用同一个监听端口 —— 域名切到哪台，客户端都不用改端口。
+			{Position: 0, NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 0, NodeID: b.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 1, NodeID: c.ID, ListenPort: 20001, Mode: ForwardModeKernel},
+		},
+	}
+	if err := st.CreateForwardRule(ctx, r); err != nil {
+		t.Fatalf("建多入口规则失败: %v", err)
+	}
+
+	got, err := st.GetForwardRule(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("读规则失败: %v", err)
+	}
+	if len(got.Hops) != 3 {
+		t.Fatalf("应有 3 行跳记录，实际 %d：%+v", len(got.Hops), got.Hops)
+	}
+
+	entries := 0
+	ids := map[int64]bool{}
+	for _, h := range got.Hops {
+		ids[h.ID] = true
+		if h.Position == 0 {
+			entries++
+		}
+	}
+	if entries != 2 {
+		t.Errorf("position 0 应有 2 行（两个入口），实际 %d", entries)
+	}
+	// 每个入口有独立的 hop_id，流量各算各的。
+	if len(ids) != 3 {
+		t.Errorf("三行跳应有三个不同的 ID，实际 %d 个", len(ids))
+	}
+}
+
+// 同一位置上重复同一个节点仍然要被数据库挡住。
+func TestForwardRuleRejectsDuplicateNodeAtSamePosition(t *testing.T) {
+	st := newForwardTestStore(t)
+	ctx := context.Background()
+	a := newForwardTestNode(t, st, "入口A")
+
+	err := st.CreateForwardRule(ctx, &ForwardRule{
+		Name: "重复入口", Proto: ForwardProtoTCP,
+		DestHost: "1.2.3.4", DestPort: 443, Enabled: true,
+		Hops: []ForwardHop{
+			{Position: 0, NodeID: a.ID, ListenPort: 8443, Mode: ForwardModeKernel},
+			{Position: 0, NodeID: a.ID, ListenPort: 8444, Mode: ForwardModeKernel},
+		},
+	})
+	if err == nil {
+		t.Error("同一位置重复同一个节点应当被唯一约束拒绝")
 	}
 }
 
