@@ -562,6 +562,17 @@ export const ForwardView = {
             );
         }
 
+        // 多入口时一次复制全部地址，一行一个。
+        //
+        // 这个拼接必须放在这里、不能写进模板：模板是反引号字符串，
+        // 里面的 \n 会被 JS 先转成真正的换行符，Vue 拿到的就成了一个
+        // 跨行的字符串字面量 —— 表达式编译直接抛异常，**整个页面白屏**。
+        function copyEntries(rule) {
+            const list = (rule.entries || []).map((e) => e.address);
+            if (!list.length) return;
+            copy(list.join("\n"));
+        }
+
         // 转发流量在网卡上进出各走一遍，双向计费口径下要算两倍。
         // 这个提示直接放在页面上，省得用户自己去对账。
         const totalShare = computed(() =>
@@ -574,7 +585,7 @@ export const ForwardView = {
         return {
             rules, nodes, fwdNodes, loading, syncing, editRule, editNode, busy,
             testing, testReport, runTest,
-            load, toggle, remove, syncAll, copy, fmtBytes, totalShare,
+            load, toggle, remove, syncAll, copy, copyEntries, fmtBytes, totalShare,
         };
     },
     template: `
@@ -671,7 +682,7 @@ export const ForwardView = {
                                             <span v-if="testing === r.id" class="spinner"></span>测试
                                         </button>
                                         <button class="btn small" :disabled="!(r.entries || []).length"
-                                                @click="copy((r.entries || []).map(e => e.address).join('\n'))">复制入口</button>
+                                                @click="copyEntries(r)">复制入口</button>
                                         <button class="btn small" :disabled="busy === r.id" @click="toggle(r)">
                                             {{ r.enabled ? '停用' : '启用' }}
                                         </button>

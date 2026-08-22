@@ -24,6 +24,11 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -race -count=1
 
+      # 前端模板是运行时编译的，写错了只有浏览器控制台会说话，页面直接白屏，
+      # 上面两步一个都测不到。CI 的 runner 自带 Node，顺手编译一遍。
+      - name: 检查前端模板
+        run: node scripts/check-web.mjs
+
   build:
     needs: test
     runs-on: ubuntu-latest

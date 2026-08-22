@@ -49,6 +49,21 @@ test-race:
 vet:
 	go vet ./...
 
+## check-web: 编译一遍前端组件的模板（需要 Node，没有就跳过）
+#
+# Vue 的模板是运行时编译的，模板里的表达式写错只会在浏览器控制台报错，
+# 而页面整片白屏 —— Go 的测试和 e2e 都发现不了。这个检查把每个组件的
+# 模板真的编译一遍，把这类问题拦在提交之前。
+#
+# 项目本身不需要 Node，所以这一步是可选的：没装 Node 就跳过，不挡构建。
+.PHONY: check-web
+check-web:
+	@if command -v node >/dev/null 2>&1; then \
+		node scripts/check-web.mjs; \
+	else \
+		echo "→ 跳过前端模板检查（机器上没有 Node）"; \
+	fi
+
 ## run: 本地起面板（调试用，监听 127.0.0.1:8080）
 .PHONY: run
 run: panel agents
@@ -56,7 +71,7 @@ run: panel agents
 
 ## e2e: 本地端到端验收（起面板 + 两个伪造流量的探针，验证重启不丢账、超额触发）
 .PHONY: e2e
-e2e: build
+e2e: build check-web
 	./scripts/e2e.sh
 
 ## clean: 清掉编译产物（保留数据库）
