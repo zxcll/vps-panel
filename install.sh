@@ -139,6 +139,30 @@ download_binary() {
     ok "已安装到 $out"
 }
 
+# bin_version 读一个已装好的二进制的版本号。没装过或跑不起来时返回空串。
+bin_version() {
+    [ -x "$1" ] || return 0
+    "$1" --version 2>/dev/null | awk '{print $2}'
+}
+
+# report_upgrade 打印一次「从哪个版本升到哪个版本」。
+#
+# 升级最常见的疑问就是「到底升上去了没有」，直接把前后版本号摆出来，
+# 比让用户自己去 systemctl status 里翻要好。
+report_upgrade() {
+    local label="$1" before="$2" after="$3"
+    if [ -z "$after" ]; then
+        return 0
+    fi
+    if [ -z "$before" ]; then
+        ok "$label 版本 $after"
+    elif [ "$before" = "$after" ]; then
+        ok "$label 已是 $after（没有新版本）"
+    else
+        ok "$label 已升级：$before → $after"
+    fi
+}
+
 # download_agents 把各架构探针下到面板的数据目录。
 #
 # 这一步以前漏了，导致面板装好后节点端一键安装必然 404 ——
@@ -266,7 +290,13 @@ panel_install() {
 
     title "$([ $upgrade = 1 ] && echo '升级面板端' || echo '安装面板端')"
 
+    local before after
+    before="$(bin_version "$PANEL_BIN")"
+    [ -n "$before" ] && info "当前面板版本 $before"
+
     download_binary panel "$arch" "$PANEL_BIN" || return 1
+    after="$(bin_version "$PANEL_BIN")"
+    report_upgrade "面板" "$before" "$after"
 
     mkdir -p "$PANEL_DATA"
     chmod 750 "$PANEL_DATA"
@@ -465,6 +495,10 @@ agent_install() {
 
     title "$([ $upgrade = 1 ] && echo '升级节点端' || echo '安装节点端')"
 
+    local before_ver
+    before_ver="$(bin_version "$AGENT_BIN")"
+    [ -n "$before_ver" ] && info "当前探针版本 $before_ver"
+
     # 升级时如果没给新参数，沿用已有配置
     if [ "$upgrade" = 1 ] && [ -z "$server" ] && [ -z "$secret" ]; then
         info "保留已有配置：$AGENT_ENV"
@@ -527,6 +561,7 @@ agent_install() {
         fi
     fi
     [ "$from_panel" = 0 ] && { download_binary agent "$arch" "$AGENT_BIN" || return 1; }
+    report_upgrade "探针" "$before_ver" "$(bin_version "$AGENT_BIN")"
 
     agent_forward_deps
     mkdir -p "$AGENT_STATE_DIR" && chmod 750 "$AGENT_STATE_DIR"
@@ -772,7 +807,8 @@ VPS 流量面板 —— 安装管理脚本
   bash $0 agent <动作> [选项]                操作节点端
 
 动作：
-  install     安装或升级
+  install     安装或升级（已装过就只换二进制，配置原样保留）
+  upgrade     install 的别名，语义更明确
   agents      下载/更新探针二进制（仅面板端；节点一键安装依赖它）
   start       启动
   stop        停止
@@ -796,6 +832,12 @@ VPS 流量面板 —— 安装管理脚本
   # 装面板
   sudo bash $0 panel install
 
+  # 升级到最新版（配置、数据库、主密钥都不动）
+  sudo bash $0 panel upgrade
+
+  # 升级面板之后，节点探针可以直接在面板界面上批量推送升级，
+  # 不用再挨台 SSH 上去跑这个脚本
+
   # 批量装探针（不进菜单）
   sudo bash $0 agent install --server wss://panel.example.com --secret abc123
 
@@ -817,7 +859,10 @@ main() {
     case "$side" in
         panel)
             case "$action" in
-                install)   panel_install ;;
+                # upgrade 是 install 的别名：panel_install 检测到服务已存在
+                # 就会保留配置、只换二进制。给它一个明确的名字，
+                # 是因为「升级也执行 install」实在不像话，用户会以为要先卸载。
+                install|upgrade|update) panel_install ;;
                 agents)    need_root; download_agents ;;
                 start)     svc_start   "$PANEL_SERVICE" "面板" ;;
                 stop)      svc_stop    "$PANEL_SERVICE" "面板" ;;
@@ -829,7 +874,7 @@ main() {
             esac ;;
         agent)
             case "$action" in
-                install)   agent_install "$@" ;;
+                install|upgrade|update) agent_install "$@" ;;
                 start)     svc_start   "$AGENT_SERVICE" "探针" ;;
                 stop)      svc_stop    "$AGENT_SERVICE" "探针" ;;
                 restart)   svc_restart "$AGENT_SERVICE" "探针" ;;

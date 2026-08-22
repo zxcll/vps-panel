@@ -24,6 +24,7 @@ const (
 	// EventCDTAction 是面板对阿里云实例真正动了手：熔断停机、保活拉起、
 	// 定时开关机。这类事件一定要留痕，机器被停了得能查到是谁停的、为什么。
 	EventCDTAction    = "cdt_action"
+	EventAgentUpgrade = "agent_upgrade"
 	EventSystem       = "system"
 )
 

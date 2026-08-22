@@ -92,6 +92,10 @@ func (s *Server) Handler() http.Handler {
 
 	auth("GET /api/nodes", s.handleListNodes)
 	auth("POST /api/nodes", s.handleCreateNode)
+	// 探针远程升级。字面量段优先，不会和 /nodes/{id} 打架。
+	auth("GET /api/nodes/versions", s.handleAgentVersions)
+	auth("POST /api/nodes/upgrade", s.handleUpgradeAll)
+	auth("POST /api/nodes/{id}/upgrade", s.handleUpgradeNode)
 	auth("GET /api/nodes/{id}", s.handleGetNode)
 	auth("PUT /api/nodes/{id}", s.handleUpdateNode)
 	auth("DELETE /api/nodes/{id}", s.handleDeleteNode)

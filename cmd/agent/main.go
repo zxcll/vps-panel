@@ -32,6 +32,7 @@ func main() {
 		mode     = flag.String("mode", envOr("VPS_AGENT_MODE", "auto"), "通信方式: auto|ws|http")
 		allowEx  = flag.Bool("allow-exec", envBool("VPS_AGENT_ALLOW_EXEC", true), "是否允许面板下发自定义命令")
 		allowFwd = flag.Bool("allow-forward", envBool("VPS_AGENT_ALLOW_FORWARD", true), "是否允许面板下发端口转发规则")
+		allowUp  = flag.Bool("allow-upgrade", envBool("VPS_AGENT_ALLOW_UPGRADE", true), "是否允许面板远程推送探针升级")
 		fwdState = flag.String("forward-state", envOr("VPS_AGENT_FORWARD_STATE", defaultForwardState), "转发状态文件路径，重启后靠它恢复规则和计数")
 		fwdPool  = flag.Int("forward-pool", envInt("VPS_AGENT_FORWARD_POOL", 4), "用户态转发每个端口的预连接数，0 表示不预连接")
 		fake     = flag.String("fake-traffic", envOr("VPS_AGENT_FAKE_TRAFFIC", ""), "调试用：伪造流量速率，如 50MB/s")
@@ -56,6 +57,7 @@ func main() {
 		Mode:            *mode,
 		AllowExec:       *allowEx,
 		AllowForward:    *allowFwd,
+		AllowUpgrade:    *allowUp,
 		ForwardState:    *fwdState,
 		ForwardPoolSize: *fwdPool,
 		FakeTraffic:     *fake,

@@ -56,6 +56,13 @@ func (a *Agent) execute(ctx context.Context, cmd protocol.Command) protocol.Comm
 		res.Output = string(out)
 		res.OK = true
 
+	case protocol.CmdUpgrade:
+		// 结果里的 ID 要自己补上：upgrade 返回的是一个新构造的
+		// CommandResult，没经过上面那个 res。
+		out := a.upgrade(ctx, cmd.Upgrade)
+		out.ID = cmd.ID
+		return out
+
 	case protocol.CmdExec:
 		if !a.cfg.AllowExec {
 			res.Error = "该探针启动时禁用了自定义命令执行（--allow-exec=false）"

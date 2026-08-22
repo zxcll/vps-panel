@@ -125,7 +125,38 @@ const (
 	// 请求参数放在 Command.Probe 里。它不执行任何命令，
 	// 所以不受 --allow-exec 约束，只受 --allow-forward 约束。
 	CmdForwardTest = "forward_test"
+	// CmdUpgrade 让探针从面板下载新版二进制、替换自己，然后退出让
+	// systemd 用新版拉起来。省掉挨台机器 SSH 上去跑安装脚本。
+	//
+	// 它不受 --allow-exec 约束：那个开关管的是「面板能不能在这台机器上
+	// 跑任意命令」，而升级只会把探针换成面板上那个二进制，是一件封闭的事。
+	// 真要禁掉的话用 --allow-upgrade=false。
+	CmdUpgrade = "upgrade"
 )
+
+// UpgradeRequest 是 CmdUpgrade 的参数。
+type UpgradeRequest struct {
+	// Version 是面板期望升到的版本，只用于日志和结果描述。
+	// 探针不拿它做判断——面板给什么二进制就装什么，版本号只是说明。
+	Version string `json:"version,omitempty"`
+	// Force 为真时即使版本号相同也照样替换。
+	// 用于「二进制被改坏了、重装一次」这种情况。
+	Force bool `json:"force,omitempty"`
+}
+
+// UpgradeResult 是升级结果，序列化后放在 CommandResult.Output 里。
+type UpgradeResult struct {
+	// FromVersion 是升级前的版本，ToVersion 是面板声称的目标版本。
+	FromVersion string `json:"from_version"`
+	ToVersion   string `json:"to_version"`
+	// Replaced 为假表示没动二进制（已经是目标版本，且没有 Force）。
+	Replaced bool `json:"replaced"`
+	// Restarting 为真表示探针即将退出，等 systemd 把它拉起来。
+	Restarting bool   `json:"restarting"`
+	BinaryPath string `json:"binary_path,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	Message    string `json:"message"`
+}
 
 // ForwardProbe 是 CmdForwardTest 的结果，序列化后放在 CommandResult.Output 里。
 //
@@ -163,6 +194,8 @@ type Command struct {
 	// Script/TimeoutSec：TimeoutSec 是 Hub 用来算等待超时的，
 	// 往里塞端口号会让面板等上几个小时。
 	Probe *ProbeRequest `json:"probe,omitempty"`
+	// Upgrade 只在 CmdUpgrade 时有意义。
+	Upgrade *UpgradeRequest `json:"upgrade,omitempty"`
 }
 
 // ProbeRequest 是一次连通性测试的请求。

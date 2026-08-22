@@ -54,6 +54,13 @@ type Config struct {
 	// 所以单独给一个开关，不复用 AllowExec。
 	AllowForward bool
 
+	// AllowUpgrade 决定是否接受面板下发的自升级指令。
+	//
+	// 单独一个开关，不复用 AllowExec：那个开关管的是「面板能不能在这台机器上
+	// 跑任意命令」，而升级只会把探针换成面板上那个二进制，是一件封闭的事，
+	// 两者的信任级别不一样。默认开着，不然「面板一键升级」就没意义了。
+	AllowUpgrade bool
+
 	// ForwardState 是转发状态文件路径。探针重启后靠它恢复规则、接上计数。
 	ForwardState string
 

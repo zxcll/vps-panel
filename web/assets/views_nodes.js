@@ -341,16 +341,75 @@ export const NodesView = {
         const loading = ref(true);
         const editing = ref(null); // null=不显示, {}=新建, node=编辑
         const install = ref(null);
+        // 探针版本信息：面板认为的最新版 + 每台机器当前跑的版本。
+        const versions = ref({ latest_version: "", outdated_count: 0, nodes: [], missing_binaries: [] });
+        const upgrading = ref(0);       // 正在升级的节点 id，0 表示没有
+        const upgradingAll = ref(false);
+        const upgradeReport = ref(null);
         let timer = null;
 
         async function load(silent = false) {
             if (!silent) loading.value = true;
             try {
-                nodes.value = (await api("/api/nodes")) || [];
+                const [n, v] = await Promise.all([
+                    api("/api/nodes"),
+                    api("/api/nodes/versions").catch(() => null),
+                ]);
+                nodes.value = n || [];
+                if (v) versions.value = v;
             } catch (e) {
                 toast(e.message, "error");
             } finally {
                 loading.value = false;
+            }
+        }
+
+        // 按节点 id 索引版本信息，模板里直接查。
+        const versionOf = computed(() => {
+            const m = {};
+            for (const row of versions.value.nodes || []) m[row.node_id] = row;
+            return m;
+        });
+
+        // 面板上缺哪个架构的二进制，升级到那台机器一定会失败，得先说清楚。
+        const missingBinaries = computed(() => versions.value.missing_binaries || []);
+
+        async function upgrade(n) {
+            const row = versionOf.value[n.id];
+            const cur = row?.version || "未知";
+            if (!window.confirm(
+                `把节点「${n.name}」的探针从 ${cur} 升到 ${versions.value.latest_version} 吗？\n\n` +
+                `探针会从面板下载新版二进制、校验能正常执行之后再替换自己，然后重启。\n` +
+                `校验不过就不会动旧版本。升级期间这台机器的流量统计会短暂中断几秒。`)) return;
+
+            upgrading.value = n.id;
+            try {
+                const res = await api(`/api/nodes/${n.id}/upgrade`, { method: "POST", body: { force: false } });
+                toast(res.message || "已升级", res.ok ? "success" : "info", 9000);
+            } catch (e) {
+                toast(e.message, "error", 12000);
+            } finally {
+                upgrading.value = 0;
+                // 探针重启要几秒，等一下再刷新才看得到新版本号。
+                setTimeout(() => load(true), 6000);
+            }
+        }
+
+        async function upgradeAll() {
+            if (!window.confirm(
+                `把所有在线节点的探针都升到 ${versions.value.latest_version} 吗？\n\n` +
+                `已经是最新版的会自动跳过，不在线的也会跳过。\n` +
+                `升级是一台一台做的，节点多的话要等一会儿。`)) return;
+
+            upgradingAll.value = true;
+            try {
+                const res = await api("/api/nodes/upgrade", { method: "POST", body: { force: false } });
+                upgradeReport.value = res;
+            } catch (e) {
+                toast(e.message, "error", 12000);
+            } finally {
+                upgradingAll.value = false;
+                setTimeout(() => load(true), 6000);
             }
         }
 
@@ -407,6 +466,8 @@ export const NodesView = {
         return {
             nodes, loading, editing, install, create, edit, onSaved, remove,
             showInstall, rotate, load, fmtBytes, fmtRate, fmtAgo, fmtTime,
+            versions, versionOf, missingBinaries, upgrading, upgradingAll,
+            upgradeReport, upgrade, upgradeAll,
         };
     },
     template: `
@@ -417,9 +478,20 @@ export const NodesView = {
                     <p>添加要监控的机器，设置流量配额、每月清零日，以及流量跑满后怎么处理</p>
                 </div>
                 <div class="btn-row">
+                    <button class="btn" :disabled="upgradingAll || !versions.outdated_count"
+                            @click="upgradeAll">
+                        <span v-if="upgradingAll" class="spinner"></span>
+                        升级探针<template v-if="versions.outdated_count">（{{ versions.outdated_count }} 台可升）</template>
+                    </button>
                     <button class="btn" @click="load()">刷新</button>
                     <button class="btn primary" @click="create">新建节点</button>
                 </div>
+            </div>
+
+            <div v-if="missingBinaries.length" class="notice error" style="margin-bottom:14px">
+                面板上缺少这些架构的探针二进制：<b>{{ missingBinaries.join('、') }}</b>。
+                对应架构的机器无法一键安装，也无法远程升级。
+                在面板机器上执行 <code>sudo bash install.sh panel agents</code> 补上。
             </div>
 
             <div v-if="loading && !nodes.length" class="empty"><span class="spinner"></span> 加载中…</div>
@@ -435,7 +507,7 @@ export const NodesView = {
                     <table>
                         <thead>
                             <tr>
-                                <th>节点</th><th>状态</th><th>本周期用量</th>
+                                <th>节点</th><th>状态</th><th>探针版本</th><th>本周期用量</th>
                                 <th>计费口径</th><th>清零</th><th>超额动作</th><th>操作</th>
                             </tr>
                         </thead>
@@ -448,6 +520,17 @@ export const NodesView = {
                                 <td>
                                     <StatusBadge :status="n.status" />
                                     <div class="node-meta">{{ fmtAgo(n.last_seen) }}</div>
+                                </td>
+                                <td>
+                                    <template v-if="versionOf[n.id] && versionOf[n.id].version">
+                                        <span class="tabular">{{ versionOf[n.id].version }}</span>
+                                        <div v-if="versionOf[n.id].outdated" class="node-meta">
+                                            <span class="badge warning">
+                                                <span class="dot"></span>可升到 {{ versions.latest_version }}
+                                            </span>
+                                        </div>
+                                    </template>
+                                    <span v-else class="muted">—</span>
                                 </td>
                                 <td style="min-width:200px">
                                     <QuotaMeter :used="n.quota_status.billed_bytes" :quota="n.quota_bytes"
@@ -462,6 +545,11 @@ export const NodesView = {
                                 <td>
                                     <div class="btn-row">
                                         <button class="btn small" @click="edit(n)">编辑</button>
+                                        <button v-if="versionOf[n.id] && versionOf[n.id].online"
+                                                class="btn small" :disabled="upgrading === n.id"
+                                                @click="upgrade(n)">
+                                            <span v-if="upgrading === n.id" class="spinner"></span>升级
+                                        </button>
                                         <button class="btn small" @click="showInstall(n)">安装</button>
                                         <button class="btn small" @click="rotate(n)">换密钥</button>
                                         <button class="btn small danger" @click="remove(n)">删除</button>
@@ -475,6 +563,48 @@ export const NodesView = {
 
             <NodeEditor v-if="editing" :node="editing.node"
                         @close="editing = null" @saved="onSaved" />
+
+            <Modal v-if="upgradeReport" title="批量升级结果" wide @close="upgradeReport = null">
+                <p class="field-hint" style="margin-bottom:12px">
+                    目标版本 <b>{{ upgradeReport.latest_version }}</b>：
+                    已升级 {{ upgradeReport.upgraded }} 台，
+                    跳过 {{ upgradeReport.skipped }} 台，
+                    失败 {{ upgradeReport.failed }} 台。
+                </p>
+                <div class="table-scroll">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>节点</th>
+                                <th style="width:120px">版本变化</th>
+                                <th style="width:90px">结果</th>
+                                <th>说明</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="r in upgradeReport.results" :key="r.node_id">
+                                <td>{{ r.node_name }}</td>
+                                <td class="tabular">
+                                    {{ r.from_version || '—' }} → {{ r.to_version }}
+                                </td>
+                                <td>
+                                    <span class="badge" :class="r.skipped ? 'muted' : (r.ok ? 'good' : 'critical')">
+                                        <span class="dot"></span>{{ r.skipped ? '跳过' : (r.ok ? '成功' : '失败') }}
+                                    </span>
+                                </td>
+                                <td class="node-meta">{{ r.message || r.error }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="field-hint" style="margin-top:12px">
+                    探针替换完二进制会立刻重启，所以「连接断了」不一定是失败 ——
+                    过半分钟回来看这台机器的版本号有没有变上去。
+                </p>
+                <div class="modal-actions">
+                    <button class="btn" @click="upgradeReport = null">关闭</button>
+                </div>
+            </Modal>
 
             <Modal v-if="install" :title="'在「' + install.node.name + '」上安装探针'" @close="install = null">
                 <p class="field-hint" style="margin-bottom:10px">
