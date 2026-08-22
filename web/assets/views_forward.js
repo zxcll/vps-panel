@@ -684,6 +684,10 @@ export const ForwardView = {
                                         <span class="badge" :class="h.node_online ? 'good' : 'critical'">
                                             <span class="dot"></span>{{ h.node_online ? '在线' : '离线' }}
                                         </span>
+                                        <span v-if="h.node_online && !h.node_commandable" class="badge warning"
+                                              title="探针在上报，但长连接还没建起来，这会儿收不到规则下发">
+                                            <span class="dot"></span>等待长连接
+                                        </span>
                                         <span class="muted"> {{ h.mode_label }}</span>
                                         <span v-if="h.bandwidth_mbps" class="muted"> · 限 {{ h.bandwidth_mbps }}Mbps</span>
                                         <span v-if="h.target" class="muted"> → {{ h.target }}</span>

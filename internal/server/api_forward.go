@@ -31,10 +31,19 @@ type forwardRuleView struct {
 
 type forwardHopView struct {
 	store.ForwardHop
-	ModeLabel  string `json:"mode_label"`
-	NodeOnline bool   `json:"node_online"`
-	UpBytes    int64  `json:"up_bytes"`
-	DownBytes  int64  `json:"down_bytes"`
+	ModeLabel string `json:"mode_label"`
+	// NodeOnline 用的是节点的状态字段，和「节点管理」页显示的是同一个东西。
+	//
+	// 以前这里直接取 hub.Online()，也就是「WebSocket 连着没有」。那个信号
+	// 恢复得比心跳慢得多（探针降级 HTTP 时它一直是假），于是同一台机器在
+	// 节点管理页是绿的、在这里是离线，看着像面板自相矛盾。
+	NodeOnline bool `json:"node_online"`
+	// NodeCommandable 才是「现在能不能给它下发指令」——下发转发规则、
+	// 跑链路测试、推送升级都要长连接。它为假时页面上提示「等待长连接」，
+	// 而不是说成离线。
+	NodeCommandable bool  `json:"node_commandable"`
+	UpBytes         int64 `json:"up_bytes"`
+	DownBytes       int64 `json:"down_bytes"`
 	// NodeShare 是这一跳**实际消耗掉**的机器流量（界面上就叫这个名字）。
 	// 一份流量经过中转机要进来一次再出去一次，所以双向计费口径下是 (up+down) 的两倍。
 	// 有了它，用户才能把「规则转了 50G」和「机器用了 100G」对上号。
@@ -608,10 +617,11 @@ func (s *Server) forwardViews(ctx context.Context) ([]*forwardRuleView, error) {
 		}
 		for _, h := range rule.Hops {
 			hv := forwardHopView{
-				ForwardHop: h,
-				ModeLabel:  forwardModeLabel(h.Mode),
-				NodeOnline: s.hub.Online(h.NodeID),
-				Target:     targets[h.ID],
+				ForwardHop:      h,
+				ModeLabel:       forwardModeLabel(h.Mode),
+				NodeOnline:      nodes[h.NodeID] != nil && nodes[h.NodeID].Status == store.StatusOnline,
+				NodeCommandable: s.hub.Online(h.NodeID),
+				Target:          targets[h.ID],
 			}
 			if u := usage[h.ID]; u != nil {
 				hv.UpBytes, hv.DownBytes = u.UpBytes, u.DownBytes

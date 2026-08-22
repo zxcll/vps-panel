@@ -27,7 +27,7 @@ import (
 )
 
 // Version 是探针版本，上报给面板用于提示升级。
-const Version = "1.3.1"
+const Version = "1.3.2"
 
 type Config struct {
 	// Server 是面板地址，支持 wss:// ws:// https:// http:// 四种写法。
@@ -362,7 +362,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		defer a.fwd.Close()
 	}
 
-	backoff := time.Second
+	rc := newReconnect()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -371,7 +372,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		default:
 		}
 
+		started := time.Now()
 		var err error
+
 		switch a.cfg.Mode {
 		case ModeHTTP:
 			err = a.runHTTP(ctx)
@@ -379,11 +382,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			err = a.runWS(ctx)
 		default:
 			err = a.runWS(ctx)
-			if err != nil && ctx.Err() == nil {
-				// WebSocket 连不上（面板前面的反代可能没开 Upgrade），
-				// 降级用 HTTP 顶一阵子，之后再试 WebSocket
-				a.log.Warn("WebSocket 不可用，暂时降级为 HTTP 上报", "err", err)
-				httpCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			if err != nil && ctx.Err() == nil && rc.wsFailed() {
+				// 连着失败到这个份上，多半是面板前面的反代没开 Upgrade。
+				// 降级 HTTP 顶一阵子，但别顶太久 —— HTTP 模式下面板发不了
+				// 指令（下发转发规则、链路测试、推送升级全都要长连接），
+				// 界面上这台机器会显示成「等待长连接」。
+				a.log.Warn("WebSocket 连续失败，暂时降级为 HTTP 上报",
+					"连续失败次数", rc.wsFailures, "降级时长", httpFallbackWindow, "err", err)
+				httpCtx, cancel := context.WithTimeout(ctx, httpFallbackWindow)
 				err = a.runHTTP(httpCtx)
 				cancel()
 				if ctx.Err() == nil {
@@ -396,21 +402,20 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.finalFlush()
 			return nil
 		}
+
+		// 连接活过一阵子就说明这条路本来是通的，退避归位，下次立刻重连。
+		rc.connectionEnded(time.Since(started))
+
+		wait := rc.wait()
 		if err != nil {
-			a.log.Warn("与面板的连接中断，准备重连", "err", err, "等待", backoff)
+			a.log.Warn("与面板的连接中断，准备重连", "err", err, "等待", wait)
 		}
 
 		select {
 		case <-ctx.Done():
 			a.finalFlush()
 			return nil
-		case <-time.After(backoff):
-		}
-
-		// 指数退避，封顶 60 秒：面板重启或网络长时间不通时别把日志刷爆
-		backoff *= 2
-		if backoff > 60*time.Second {
-			backoff = 60 * time.Second
+		case <-time.After(wait):
 		}
 	}
 }

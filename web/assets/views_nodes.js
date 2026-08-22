@@ -342,7 +342,10 @@ export const NodesView = {
         const editing = ref(null); // null=不显示, {}=新建, node=编辑
         const install = ref(null);
         // 探针版本信息：面板认为的最新版 + 每台机器当前跑的版本。
-        const versions = ref({ latest_version: "", outdated_count: 0, nodes: [], missing_binaries: [] });
+        const versions = ref({
+            latest_version: "", outdated_count: 0, upgradable_count: 0,
+            nodes: [], missing_binaries: [],
+        });
         const upgrading = ref(0);       // 正在升级的节点 id，0 表示没有
         const upgradingAll = ref(false);
         const upgradeReport = ref(null);
@@ -478,10 +481,13 @@ export const NodesView = {
                     <p>添加要监控的机器，设置流量配额、每月清零日，以及流量跑满后怎么处理</p>
                 </div>
                 <div class="btn-row">
-                    <button class="btn" :disabled="upgradingAll || !versions.outdated_count"
+                    <button class="btn" :class="{ primary: versions.upgradable_count }"
+                            :disabled="upgradingAll || !versions.upgradable_count"
+                            :title="!versions.upgradable_count && versions.outdated_count
+                                    ? '这些机器当前都没有长连接，升级指令发不出去' : ''"
                             @click="upgradeAll">
                         <span v-if="upgradingAll" class="spinner"></span>
-                        升级探针<template v-if="versions.outdated_count">（{{ versions.outdated_count }} 台可升）</template>
+                        升级探针<template v-if="versions.outdated_count">（{{ versions.outdated_count }} 台待升）</template>
                     </button>
                     <button class="btn" @click="load()">刷新</button>
                     <button class="btn primary" @click="create">新建节点</button>
@@ -529,6 +535,9 @@ export const NodesView = {
                                                 <span class="dot"></span>可升到 {{ versions.latest_version }}
                                             </span>
                                         </div>
+                                        <div v-if="!versionOf[n.id].commandable" class="node-meta">
+                                            等待长连接，暂时收不到指令
+                                        </div>
                                     </template>
                                     <span v-else class="muted">—</span>
                                 </td>
@@ -545,8 +554,11 @@ export const NodesView = {
                                 <td>
                                     <div class="btn-row">
                                         <button class="btn small" @click="edit(n)">编辑</button>
-                                        <button v-if="versionOf[n.id] && versionOf[n.id].online"
-                                                class="btn small" :disabled="upgrading === n.id"
+                                        <button v-if="versionOf[n.id] && versionOf[n.id].version"
+                                                class="btn small"
+                                                :class="{ primary: versionOf[n.id].outdated && versionOf[n.id].commandable }"
+                                                :disabled="upgrading === n.id || !versionOf[n.id].commandable"
+                                                :title="versionOf[n.id].commandable ? '' : '探针当前没有长连接，升级指令发不出去'"
                                                 @click="upgrade(n)">
                                             <span v-if="upgrading === n.id" class="spinner"></span>升级
                                         </button>

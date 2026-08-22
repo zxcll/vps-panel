@@ -155,10 +155,12 @@ func (s *Server) upgradeNode(ctx context.Context, n *store.Node, force bool) upg
 	}
 
 	if !s.hub.Online(n.ID) {
-		// 不在线不算失败：探针连回来之后用户再点一次就行。
+		// 没有长连接不算失败：等它连回来再点一次就行。
 		// 把它算成失败会让「批量升级」在有几台机器关着的时候永远显示红色。
 		res.Skipped = true
-		res.Message = "探针不在线，跳过。等它连回来再升"
+		res.Message = "探针当前没有长连接，升级指令发不出去，已跳过。" +
+			"机器刚重启或面板刚重启时会有一小段这样的窗口，等一会儿再试；" +
+			"要是一直这样，多半是面板前面的反代没开 WebSocket Upgrade。"
 		return res
 	}
 	if !force && res.FromVersion != "" && res.FromVersion == latest {
@@ -242,21 +244,34 @@ func (s *Server) handleAgentVersions(w http.ResponseWriter, r *http.Request) {
 		NodeName string `json:"node_name"`
 		Version  string `json:"version"`
 		Online   bool   `json:"online"`
-		// Outdated 只在探针在线且报过版本号时才有意义 ——
-		// 拿不到版本号的时候说"过期了"是在瞎猜。
+		// Commandable 表示现在能不能给它下发指令。升级要走 WebSocket，
+		// 探针降级成 HTTP 上报时它是假的 —— 那时候版本号照样能收到，
+		// 但升级指令发不出去。前端据此把按钮置灰并说明原因，
+		// 而不是把按钮整个藏起来让人无从下手。
+		Commandable bool `json:"commandable"`
+		// Outdated 只看版本号，不看在不在线 —— 「这台机器该升了」和
+		// 「现在能不能升」是两回事，混在一起会让一台暂时没有长连接的机器
+		// 从「待升级」列表里凭空消失。
 		Outdated bool `json:"outdated"`
 	}
 
 	out := make([]row, 0, len(nodes))
-	outdated := 0
+	outdated, upgradable := 0, 0
 	for _, n := range nodes {
-		r := row{NodeID: n.ID, NodeName: n.Name, Online: s.hub.Online(n.ID)}
+		r := row{
+			NodeID: n.ID, NodeName: n.Name,
+			Online:      n.Status == store.StatusOnline,
+			Commandable: s.hub.Online(n.ID),
+		}
 		if live := s.hub.LiveOf(n.ID); live != nil {
 			r.Version = live.AgentVersion
 		}
-		r.Outdated = r.Online && r.Version != "" && r.Version != latest
+		r.Outdated = r.Version != "" && r.Version != latest
 		if r.Outdated {
 			outdated++
+			if r.Commandable {
+				upgradable++
+			}
 		}
 		out = append(out, r)
 	}
@@ -264,7 +279,9 @@ func (s *Server) handleAgentVersions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"latest_version": latest,
 		"outdated_count": outdated,
-		"nodes":          out,
+		// UpgradableCount 是「此刻真的升得动」的台数（版本旧 + 有长连接）。
+		"upgradable_count": upgradable,
+		"nodes":            out,
 		// MissingBinaries 非空时升级一定会失败，先告诉用户。
 		"missing_binaries": s.MissingAgentBinaries(),
 	})
