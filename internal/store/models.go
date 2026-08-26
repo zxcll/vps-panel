@@ -17,6 +17,12 @@ const (
 	ActionShutdownAgent = "shutdown_agent" // 探针本地关机
 	ActionShutdownSSH   = "shutdown_ssh"   // 面板通过 SSH 远程关机
 	ActionCommand       = "command"        // 执行自定义命令（如停服务），不关机
+	// ActionCDTStop 通过关联的阿里云 CDT 实例做节省关机（StopCharging）。
+	//
+	// 比 SSH / 探针关机强的地方有两点：停机之后不再收实例费；
+	// 走的是阿里云 API，探针死了、SSH 连不上也照样能关。
+	// 前提是这个节点关联了 CDT 实例。
+	ActionCDTStop = "cdt_stop"
 )
 
 // 节点状态。
@@ -26,6 +32,14 @@ const (
 	StatusOffline  = "offline"
 	StatusExceeded = "exceeded" // 流量超额（可能已被关机）
 	StatusStopped  = "stopped"  // 被面板主动关停
+	// StatusPlannedStop 是「计划内停机」：面板通过阿里云 CDT 按计划把它停了
+	// （定时关机、流量熔断），不是故障。
+	//
+	// 单独一个状态而不是复用 stopped，是因为两者的后续处理不一样：
+	// stopped 是「超额动作真把机器关了」，机器要人去服务商后台开；
+	// planned_stop 是面板自己停的，面板自己会在该开的时候开回来。
+	// 而且它明确不该触发掉线告警和域名切换 —— 那是把计划当成事故。
+	StatusPlannedStop = "planned_stop"
 )
 
 type Node struct {
@@ -60,6 +74,12 @@ type Node struct {
 	SSHUseSudo    bool   `json:"ssh_use_sudo"`
 
 	ProbePort int `json:"probe_port"`
+
+	// CDTInstanceID 关联到哪个阿里云 CDT 实例（cdt_instances.id），0 = 未关联。
+	//
+	// 关联之后：CDT 按计划停这台机器时，面板知道那是计划内的，
+	// 不发掉线告警、默认也不切域名；节点流量跑满时还可以走 CDT 的节省关机。
+	CDTInstanceID int64 `json:"cdt_instance_id"`
 
 	Status          string     `json:"status"`
 	LastSeen        *time.Time `json:"last_seen"`
@@ -169,6 +189,12 @@ type DNSRecord struct {
 	SwitchOnExceed  bool `json:"switch_on_exceed"`
 	SwitchOnOffline bool `json:"switch_on_offline"`
 	SwitchOnWarn    bool `json:"switch_on_warn"`
+	// SwitchOnPlannedStop 决定「计划内停机」算不算切换理由。
+	//
+	// 默认关：计划内停机是面板自己安排的，不该当成故障去切解析。
+	// 但代价要知道 —— 不切的话，定时关机期间域名会一直指着一台关着的机器。
+	// 想让它照常切走就打开这个。
+	SwitchOnPlannedStop bool `json:"switch_on_planned_stop"`
 
 	CurrentNodeID *int64     `json:"current_node_id"`
 	CurrentValue  string     `json:"current_value"`

@@ -187,6 +187,7 @@ export const EXCEED_ACTIONS = [
     { value: "shutdown_agent", label: "探针本地关机", hint: "由探针执行关机。探针进程挂了就失效" },
     { value: "shutdown_ssh", label: "SSH 远程关机", hint: "面板直连 SSH 关机。探针死了也能生效，最可靠" },
     { value: "command", label: "执行自定义命令", hint: "如 systemctl stop xray，停服务但保留 SSH" },
+    { value: "cdt_stop", label: "CDT 节省关机", hint: "通过关联的阿里云实例停机，停机后不再收实例费；走阿里云 API，探针死了也能关。需要先关联 CDT 实例" },
 ];
 
 export const FORWARD_PROTOCOLS = [
@@ -257,6 +258,9 @@ export function statusMeta(status) {
         case "offline": return { cls: "critical", text: "离线" };
         case "exceeded": return { cls: "serious", text: "流量超额" };
         case "stopped": return { cls: "muted", text: "已关停" };
+        // 计划内停机：面板通过阿里云 CDT 按计划停的（定时关机/流量熔断）。
+        // 用 warning 而不是 critical —— 它不是故障，只是机器现在不在跑。
+        case "planned_stop": return { cls: "warning", text: "计划内停机" };
         // unknown 表示探针从未上报过。说"未知"会让人以为是面板出问题了，
         // 说"待接入"才对得上真实情况：节点建好了，探针还没装上或还没连上。
         default: return { cls: "muted", text: "待接入" };

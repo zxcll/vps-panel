@@ -91,17 +91,17 @@ func (s *Store) DeleteDNSProvider(ctx context.Context, id int64) error {
 // --- DNS 记录组 ---
 
 const dnsRecordColumns = `id, provider_id, zone, name, record_type, ttl, proxied, strategy,
-	switch_on_exceed, switch_on_offline, switch_on_warn,
+	switch_on_exceed, switch_on_offline, switch_on_warn, switch_on_planned_stop,
 	current_node_id, current_value, last_switch_at, last_error, enabled, created_at, updated_at`
 
 func scanDNSRecord(sc interface{ Scan(...any) error }) (*DNSRecord, error) {
 	var r DNSRecord
-	var proxied, onExceed, onOffline, onWarn, enabled int
+	var proxied, onExceed, onOffline, onWarn, onPlanned, enabled int
 	var curNode, lastSwitch sql.NullInt64
 	var created, updated int64
 
 	if err := sc.Scan(&r.ID, &r.ProviderID, &r.Zone, &r.Name, &r.RecordType, &r.TTL, &proxied, &r.Strategy,
-		&onExceed, &onOffline, &onWarn,
+		&onExceed, &onOffline, &onWarn, &onPlanned,
 		&curNode, &r.CurrentValue, &lastSwitch, &r.LastError, &enabled, &created, &updated); err != nil {
 		return nil, err
 	}
@@ -109,6 +109,7 @@ func scanDNSRecord(sc interface{ Scan(...any) error }) (*DNSRecord, error) {
 	r.SwitchOnExceed = onExceed != 0
 	r.SwitchOnOffline = onOffline != 0
 	r.SwitchOnWarn = onWarn != 0
+	r.SwitchOnPlannedStop = onPlanned != 0
 	r.Enabled = enabled != 0
 	r.CurrentNodeID = int64Ptr(curNode)
 	r.LastSwitchAt = timePtr(lastSwitch)
@@ -164,10 +165,12 @@ func (s *Store) CreateDNSRecord(ctx context.Context, r *DNSRecord) error {
 	r.CreatedAt, r.UpdatedAt = now, now
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO dns_records (provider_id, zone, name, record_type, ttl, proxied, strategy,
-			switch_on_exceed, switch_on_offline, switch_on_warn, enabled, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			switch_on_exceed, switch_on_offline, switch_on_warn, switch_on_planned_stop,
+			enabled, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ProviderID, r.Zone, r.Name, r.RecordType, r.TTL, boolInt(r.Proxied), r.Strategy,
 		boolInt(r.SwitchOnExceed), boolInt(r.SwitchOnOffline), boolInt(r.SwitchOnWarn),
+		boolInt(r.SwitchOnPlannedStop),
 		boolInt(r.Enabled), timeVal(now), timeVal(now))
 	if err != nil {
 		return err
@@ -179,10 +182,12 @@ func (s *Store) CreateDNSRecord(ctx context.Context, r *DNSRecord) error {
 func (s *Store) UpdateDNSRecord(ctx context.Context, r *DNSRecord) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE dns_records SET provider_id=?, zone=?, name=?, record_type=?, ttl=?, proxied=?,
-			strategy=?, switch_on_exceed=?, switch_on_offline=?, switch_on_warn=?, enabled=?, updated_at=?
+			strategy=?, switch_on_exceed=?, switch_on_offline=?, switch_on_warn=?,
+			switch_on_planned_stop=?, enabled=?, updated_at=?
 		WHERE id=?`,
 		r.ProviderID, r.Zone, r.Name, r.RecordType, r.TTL, boolInt(r.Proxied),
 		r.Strategy, boolInt(r.SwitchOnExceed), boolInt(r.SwitchOnOffline), boolInt(r.SwitchOnWarn),
+		boolInt(r.SwitchOnPlannedStop),
 		boolInt(r.Enabled), timeVal(time.Now().UTC()), r.ID)
 	if err != nil {
 		return err

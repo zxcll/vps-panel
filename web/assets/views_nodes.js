@@ -33,6 +33,7 @@ function blankNode() {
         ssh_host_key: "",
         ssh_use_sudo: false,
         probe_port: 0,
+        cdt_instance_id: 0,
         enabled: true,
     };
 }
@@ -68,6 +69,7 @@ export const NodeEditor = {
                 ssh_host_key: n.ssh_host_key,
                 ssh_use_sudo: n.ssh_use_sudo,
                 probe_port: n.probe_port,
+                cdt_instance_id: n.cdt_instance_id || 0,
                 enabled: n.enabled,
             });
         }
@@ -83,6 +85,34 @@ export const NodeEditor = {
         );
 
         const needsSSH = computed(() => form.action_on_exceed === "shutdown_ssh");
+
+        // 可关联的阿里云 CDT 实例。拉不到就当没有 —— 没配 CDT 账号是常态，
+        // 不该因此把整个节点编辑弹窗弄挂。
+        const cdtInstances = ref([]);
+        onMounted(async () => {
+            try {
+                cdtInstances.value = (await api("/api/cdt/instances")) || [];
+            } catch {
+                cdtInstances.value = [];
+            }
+        });
+
+        // 按公网 IP 自动建议关联哪台。节点的 IP 和实例的公网 IP 本来就该是
+        // 同一个，让用户在一串 i-xxxx 里手动认实在太难为人了。
+        const suggestedInstance = computed(() => {
+            const ip = (form.ipv4 || "").trim();
+            if (!ip || form.cdt_instance_id) return null;
+            return cdtInstances.value.find((i) => i.public_ip === ip) || null;
+        });
+
+        function applySuggestion() {
+            if (suggestedInstance.value) form.cdt_instance_id = suggestedInstance.value.id;
+        }
+
+        // 选了「CDT 节省关机」却没关联实例，保存时后端会拒绝，
+        // 但在这里先提示一句，省得用户填完一整个表单才被打回来。
+        const cdtActionNeedsLink = computed(
+            () => form.action_on_exceed === "cdt_stop" && !form.cdt_instance_id);
 
         async function save() {
             err.value = "";
@@ -112,6 +142,7 @@ export const NodeEditor = {
                 ssh_host_key: form.ssh_host_key,
                 ssh_use_sudo: form.ssh_use_sudo,
                 probe_port: Number(form.probe_port) || 0,
+                cdt_instance_id: Number(form.cdt_instance_id) || 0,
                 enabled: form.enabled,
                 ssh_secret: null,
                 ssh_key_pass: null,
@@ -143,6 +174,7 @@ export const NodeEditor = {
         return {
             form, isEdit, saving, err, save, quotaBytes, quotaValid,
             modeHint, actionHint, needsSSH, secretTouched,
+            cdtInstances, suggestedInstance, applySuggestion, cdtActionNeedsLink,
             BILLING_MODES, EXCEED_ACTIONS, COMMON_TIMEZONES, fmtBytes,
         };
     },
@@ -254,6 +286,38 @@ export const NodeEditor = {
                     <textarea v-model="form.exceed_command"
                               placeholder="systemctl stop xray"></textarea>
                     <div class="field-hint">优先通过探针执行；探针离线时自动改走 SSH</div>
+                </div>
+                <div v-if="cdtActionNeedsLink" class="notice error">
+                    选了「CDT 节省关机」就必须先在下面关联一个阿里云 CDT 实例，
+                    否则流量跑满时面板不知道该去停哪台机器。
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>阿里云 CDT 关联（可选）</legend>
+                <p class="field-hint" style="margin:-4px 0 12px">
+                    关联之后，<b>CDT 按计划停这台机器时面板知道那是计划内的</b> ——
+                    不发掉线告警，域名解析默认也不切走（想切的话在域名记录上单独打开）。
+                    另外流量跑满时可以选「CDT 节省关机」，走阿里云 API 停机，停机后不再收实例费。
+                </p>
+                <div class="field">
+                    <label>关联实例</label>
+                    <select v-model="form.cdt_instance_id">
+                        <option :value="0">不关联</option>
+                        <option v-for="i in cdtInstances" :key="i.id" :value="i.id">
+                            {{ i.instance_name || '（未命名）' }} — {{ i.instance_id }}
+                            <template v-if="i.public_ip"> — {{ i.public_ip }}</template>
+                        </option>
+                    </select>
+                    <div v-if="!cdtInstances.length" class="field-hint">
+                        还没有可关联的实例。先到「阿里云 CDT」页添加账号，实例会自动同步过来。
+                    </div>
+                </div>
+                <div v-if="suggestedInstance" class="notice" style="margin-top:8px">
+                    检测到实例 <b>{{ suggestedInstance.instance_name || suggestedInstance.instance_id }}</b>
+                    的公网 IP 和这个节点一样（{{ suggestedInstance.public_ip }}），多半就是同一台机器。
+                    <button class="btn small primary" style="margin-left:8px"
+                            @click="applySuggestion">关联它</button>
                 </div>
             </fieldset>
 

@@ -302,7 +302,7 @@ func (s *Server) cdtTrip(ctx context.Context, a *store.CDTAccount, cycle, reason
 	s.log.Warn("CDT 熔断", "账号", a.Name, "原因", reason)
 	s.st.AddEvent(ctx, nil, store.EventCDTAction, store.LevelError, msg)
 
-	stopped, failed := s.cdtStopGuarded(ctx, a)
+	stopped, failed := s.cdtStopGuarded(ctx, a, reason)
 
 	body := msg
 	switch {
@@ -321,7 +321,7 @@ func (s *Server) cdtTrip(ctx context.Context, a *store.CDTAccount, cycle, reason
 }
 
 // cdtStopGuarded 停掉一个账号下所有受守护、且还在运行的实例。
-func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount) (stopped, failed []string) {
+func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount, reason string) (stopped, failed []string) {
 	client, err := s.cdtClient(ctx, a.ID)
 	if err != nil {
 		return nil, []string{err.Error()}
@@ -340,6 +340,10 @@ func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount) (stopp
 			continue
 		}
 		s.st.SetCDTInstanceStatus(ctx, inst.ID, alicloud.StatusStopping)
+		// 关键一步：告诉面板这台机器是**我们自己按计划停的**。
+		// 少了它，关联的节点会在几十秒后被判成掉线 —— 发告警、切域名，
+		// 把一次计划内的停机当成事故处理。
+		s.cdtCtl.MarkNodePlannedStop(ctx, inst.ID, reason)
 		stopped = append(stopped, instLabel(inst))
 	}
 	return stopped, failed
@@ -398,6 +402,9 @@ func (s *Server) cdtStartGuarded(ctx context.Context, a *store.CDTAccount) []str
 			continue
 		}
 		s.st.SetCDTInstanceStatus(ctx, inst.ID, alicloud.StatusStarting)
+		// 机器要回来了，把关联节点从「计划内停机」里放出来 ——
+		// 置回 unknown，让 engine 顺着心跳自然恢复成 online。
+		s.cdtCtl.ClearNodePlannedStop(ctx, inst.ID)
 		started = append(started, instLabel(inst))
 	}
 	return started
@@ -492,6 +499,7 @@ func (s *Server) cdtKeepAlive(ctx context.Context, a *store.CDTAccount) {
 			continue
 		}
 		s.st.SetCDTInstanceStatus(ctx, inst.ID, alicloud.StatusStarting)
+		s.cdtCtl.ClearNodePlannedStop(ctx, inst.ID)
 
 		// 之前报过库存不足，这次成功了，说明库存回来了，值得说一声。
 		if a.NoStockNotified {
@@ -581,7 +589,7 @@ func (s *Server) cdtScheduledPower(ctx context.Context, a *store.CDTAccount, sta
 		}
 		names = s.cdtStartGuarded(ctx, a)
 	} else {
-		stopped, failed := s.cdtStopGuarded(ctx, a)
+		stopped, failed := s.cdtStopGuarded(ctx, a, action)
 		names = stopped
 		if len(failed) > 0 {
 			s.st.AddEvent(ctx, nil, store.EventCDTAction, store.LevelError,

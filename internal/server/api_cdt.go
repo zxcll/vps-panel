@@ -455,6 +455,12 @@ func (s *Server) cdtPower(w http.ResponseWriter, r *http.Request, start bool) {
 	}
 
 	s.st.SetCDTInstanceStatus(ctx, inst.ID, status)
+	// 手动开关机同样要联动关联节点的状态，否则手动停完还是会收到掉线告警。
+	if start {
+		s.cdtCtl.ClearNodePlannedStop(ctx, inst.ID)
+	} else {
+		s.cdtCtl.MarkNodePlannedStop(ctx, inst.ID, "手动停机")
+	}
 	if start && account.Tripped() {
 		// 用户明确要开机，解除熔断，别让后台循环下一轮又把它停了。
 		s.st.ClearCDTTripped(ctx, account.ID)
@@ -548,23 +554,9 @@ func (s *Server) cdtViews(ctx context.Context) ([]*cdtAccountView, error) {
 // --- 小工具 ---
 
 // cdtClient 用库里存的凭据构造一个阿里云客户端。
+// 实现在 internal/cdtctl 里 —— 超额动作那边也要用同一份。
 func (s *Server) cdtClient(ctx context.Context, accountID int64) (*alicloud.Client, error) {
-	a, err := s.st.GetCDTAccount(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
-	enc, err := s.st.CDTAccountCred(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
-	secret, err := s.cipher.Decrypt(enc)
-	if err != nil {
-		return nil, fmt.Errorf("解密账号「%s」的凭据失败：%w（master.key 换过吗？）", a.Name, err)
-	}
-	if secret == "" {
-		return nil, fmt.Errorf("账号「%s」还没有填写 AccessKeySecret", a.Name)
-	}
-	return alicloud.New(a.AccessKeyID, secret, a.RegionID, a.SiteType)
+	return s.cdtCtl.ClientFor(ctx, accountID)
 }
 
 // checkCDTCredentials 用请求里带的凭据实拨一次，确认它真的能用。

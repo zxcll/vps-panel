@@ -170,6 +170,9 @@ type recordRequest struct {
 	SwitchOnExceed  bool `json:"switch_on_exceed"`
 	SwitchOnOffline bool `json:"switch_on_offline"`
 	SwitchOnWarn    bool `json:"switch_on_warn"`
+	// SwitchOnPlannedStop 决定「计划内停机」算不算切换理由。默认关 ——
+	// 那是面板通过 CDT 按计划停的机器，不是故障。
+	SwitchOnPlannedStop bool `json:"switch_on_planned_stop"`
 
 	Enabled bool               `json:"enabled"`
 	Members []recordMemberItem `json:"members"`
@@ -243,6 +246,7 @@ func (req *recordRequest) applyTo(rec *store.DNSRecord) {
 	rec.SwitchOnExceed = req.SwitchOnExceed
 	rec.SwitchOnOffline = req.SwitchOnOffline
 	rec.SwitchOnWarn = req.SwitchOnWarn
+	rec.SwitchOnPlannedStop = req.SwitchOnPlannedStop
 	rec.Enabled = req.Enabled
 }
 

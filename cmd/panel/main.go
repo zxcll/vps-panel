@@ -20,6 +20,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/zxcll/vps-panel/internal/action"
+	"github.com/zxcll/vps-panel/internal/cdtctl"
 	"github.com/zxcll/vps-panel/internal/config"
 	"github.com/zxcll/vps-panel/internal/crypto"
 	"github.com/zxcll/vps-panel/internal/engine"
@@ -42,7 +43,7 @@ func main() {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Println("vps-panel", version)
+		fmt.Println("vps-panel", server.PanelVersion())
 		return
 	}
 
@@ -53,8 +54,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-const version = "1.5.0"
 
 func newLogger(level string) *slog.Logger {
 	var lv slog.Level
@@ -130,12 +129,15 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	hub := server.NewHub(log)
 	notifier := notify.New(st, log)
 	sshRunner := action.NewSSHRunner(cipher)
-	exec := action.NewExecutor(st, sshRunner, hub)
+	// cdtCtl 把「拿库里的凭据去操作阿里云实例」这件事收在一处，
+	// 超额动作（CDT 节省关机）和 CDT 后台循环都用它。
+	cdtCtl := cdtctl.New(st, cipher, log)
+	exec := action.NewExecutor(st, sshRunner, hub, cdtCtl)
 	fo := failover.New(st, cipher, notifier, hub, log)
 	eng := engine.New(st, exec, fo, notifier, log)
 	ing := ingest.New(st)
 
-	srv := server.New(cfg, st, cipher, hub, ing, exec, fo, eng, notifier, log)
+	srv := server.New(cfg, st, cipher, hub, ing, exec, fo, eng, notifier, cdtCtl, log)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -193,7 +195,7 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 }
 
 func printBanner(log *slog.Logger, listen, dataDir, initialPassword string) {
-	log.Info("面板已启动", "监听", listen, "数据目录", dataDir, "版本", version)
+	log.Info("面板已启动", "监听", listen, "数据目录", dataDir, "版本", server.PanelVersion())
 
 	if initialPassword != "" {
 		// 只有首次启动会打印。用醒目的分隔让它不会淹没在日志里。

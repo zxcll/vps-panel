@@ -123,6 +123,7 @@ const RecordEditor = {
             strategy: r?.strategy || "failover",
             switch_on_exceed: r ? r.switch_on_exceed : true,
             switch_on_offline: r ? r.switch_on_offline : true,
+            switch_on_planned_stop: r ? r.switch_on_planned_stop : false,
             switch_on_warn: r ? r.switch_on_warn : false,
             enabled: r ? r.enabled : true,
         });
@@ -186,6 +187,7 @@ const RecordEditor = {
                 strategy: form.strategy,
                 switch_on_exceed: form.switch_on_exceed,
                 switch_on_offline: form.switch_on_offline,
+                switch_on_planned_stop: form.switch_on_planned_stop,
                 switch_on_warn: form.switch_on_warn,
                 enabled: form.enabled,
                 members: members.value,
@@ -317,10 +319,20 @@ const RecordEditor = {
                     <label class="checkbox-label" style="margin-bottom:6px">
                         <input type="checkbox" v-model="form.switch_on_offline"> 节点离线时
                     </label>
-                    <label class="checkbox-label">
+                    <label class="checkbox-label" style="margin-bottom:6px">
                         <input type="checkbox" v-model="form.switch_on_warn">
                         流量达到预警线时就提前切走（给自己留余量）
                     </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" v-model="form.switch_on_planned_stop">
+                        计划内停机时也切走
+                    </label>
+                    <div class="field-hint" style="margin-top:4px">
+                        「计划内停机」指面板通过阿里云 CDT 按计划停的机器（定时关机、流量熔断）。
+                        <b>默认不切</b>：那是面板自己安排的，不是故障，当成故障处理会造成没必要的解析抖动。<br>
+                        但代价要知道 —— 不切的话，停机期间域名会一直指着一台关着的机器，客户端连不上。
+                        机器停着的时候希望流量走别处，就打开这个。
+                    </div>
                 </template>
                 <label class="checkbox-label" style="margin-top:10px">
                     <input type="checkbox" v-model="form.enabled"> 启用这条记录
@@ -534,6 +546,7 @@ export const DNSView = {
                                     <template v-else>
                                         <div v-if="r.switch_on_exceed" class="node-meta">流量耗尽</div>
                                         <div v-if="r.switch_on_offline" class="node-meta">节点离线</div>
+                                        <div v-if="r.switch_on_planned_stop" class="node-meta">计划内停机</div>
                                         <div v-if="r.switch_on_warn" class="node-meta">达到预警线</div>
                                     </template>
                                 </td>

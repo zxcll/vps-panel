@@ -122,6 +122,8 @@ type newColumn struct {
 // 会带上新列，新装的库一次到位，这里只管老库。
 var pendingColumns = []newColumn{
 	{"cdt_accounts", "sync_interval_sec", "INTEGER NOT NULL DEFAULT 300"},
+	{"nodes", "cdt_instance_id", "INTEGER NOT NULL DEFAULT 0"},
+	{"dns_records", "switch_on_planned_stop", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func (s *Store) addMissingColumns() error {

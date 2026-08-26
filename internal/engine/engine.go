@@ -131,12 +131,17 @@ func (e *Engine) Tick(ctx context.Context) {
 func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg store.Settings) {
 	n := s.Node
 
-	// 被超额/关停逻辑接管的节点，在线状态不参与覆盖
-	if n.Status == store.StatusExceeded || n.Status == store.StatusStopped {
+	reporting := s.AgentOnline || s.HeartbeatFresh
+
+	// 被超额/关停/计划内停机接管的节点，**离线**方向不参与覆盖 ——
+	// 那几个状态本来就意味着机器不在跑，再翻成 offline 只会盖掉更有信息量的状态，
+	// 还会顺带发一条毫无意义的掉线告警。
+	//
+	// 但**上线**方向要放行：机器回来了就该恢复成 online 并通知一声，
+	// 否则一台从计划内停机里醒过来的机器会永远显示成停机状态。
+	if isManagedDown(n.Status) && !reporting {
 		return
 	}
-
-	reporting := s.AgentOnline || s.HeartbeatFresh
 
 	switch {
 	case reporting:
@@ -148,19 +153,16 @@ func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg st
 			return
 		}
 		id := n.ID
-		if n.Status == store.StatusOffline {
-			e.st.AddEvent(ctx, &id, store.EventNodeOnline, store.LevelInfo,
-				fmt.Sprintf("节点「%s」已恢复在线", n.Name))
+		event, title, body := onlineMessage(n)
+		e.st.AddEvent(ctx, &id, store.EventNodeOnline, store.LevelInfo, event)
+		// 掉线通知一直是刚需，上线通知有人会嫌吵，所以给了开关。
+		if cfg.NotifyNodeOnline {
 			e.notifier.Send(notify.Message{
-				Level: store.LevelInfo, Title: "节点已恢复",
-				Body: fmt.Sprintf("节点「%s」重新上线", n.Name), NodeID: n.ID, NodeName: n.Name,
+				Level: store.LevelInfo, Title: title, Body: body,
+				NodeID: n.ID, NodeName: n.Name,
 			})
-			return
 		}
-		// unknown → online 是探针第一次连上。这是好消息，值得记一条，
-		// 因为用户装完探针最想确认的就是"到底接上了没有"。
-		e.st.AddEvent(ctx, &id, store.EventNodeOnline, store.LevelInfo,
-			fmt.Sprintf("节点「%s」的探针已接入，开始上报流量", n.Name))
+		return
 
 	case n.LastSeen == nil:
 		// 从来没上报过：探针还没装，或者装了但连不上面板。
@@ -191,6 +193,63 @@ func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg st
 			Body: fmt.Sprintf("节点「%s」离线：%s", n.Name, reason), NodeID: n.ID, NodeName: n.Name,
 		})
 	}
+}
+
+// isManagedDown 判断这个状态是不是「面板知道它为什么不在跑」。
+//
+// 这几个状态下机器确实是停的，但原因面板自己清楚，不该再翻成 offline 去告警：
+//
+//	exceeded     流量超额，超额动作可能已经把它关了
+//	stopped      超额动作真的把机器关掉了
+//	planned_stop CDT 按计划停的（定时关机 / 流量熔断）
+func isManagedDown(status string) bool {
+	switch status {
+	case store.StatusExceeded, store.StatusStopped, store.StatusPlannedStop:
+		return true
+	}
+	return false
+}
+
+// onlineMessage 按「上一个状态是什么」给出合适的事件与通知文案。
+//
+// 分开写是因为这几种「上线」的含义完全不同：第一次接上、故障恢复、
+// 从计划内停机里醒过来 —— 用同一句话会让人分不清刚才到底发生了什么。
+func onlineMessage(n *store.Node) (event, title, body string) {
+	switch n.Status {
+	case store.StatusOffline:
+		return fmt.Sprintf("节点「%s」已恢复在线", n.Name),
+			"节点已恢复",
+			fmt.Sprintf("节点「%s」重新上线", n.Name)
+
+	case store.StatusPlannedStop:
+		return fmt.Sprintf("节点「%s」已从计划内停机中恢复", n.Name),
+			"节点已开机",
+			fmt.Sprintf("节点「%s」已从计划内停机中恢复，重新开始上报", n.Name)
+
+	case store.StatusExceeded, store.StatusStopped:
+		return fmt.Sprintf("节点「%s」重新上线（此前处于%s状态）", n.Name, statusLabel(n.Status)),
+			"节点已恢复",
+			fmt.Sprintf("节点「%s」重新上线，此前是%s", n.Name, statusLabel(n.Status))
+
+	default:
+		// unknown → online 是探针第一次连上。用户装完探针最想确认的
+		// 就是"到底接上了没有"，值得单独说一句。
+		return fmt.Sprintf("节点「%s」的探针已接入，开始上报流量", n.Name),
+			"探针已接入",
+			fmt.Sprintf("节点「%s」的探针已连上面板，开始上报流量", n.Name)
+	}
+}
+
+func statusLabel(status string) string {
+	switch status {
+	case store.StatusExceeded:
+		return "流量超额"
+	case store.StatusStopped:
+		return "已关停"
+	case store.StatusPlannedStop:
+		return "计划内停机"
+	}
+	return status
 }
 
 // CheckQuota 判断节点是否触发预警或超额，并执行相应动作。

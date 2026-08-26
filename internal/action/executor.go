@@ -25,6 +25,9 @@ const (
 	ViaAuto  = ""      // 自动：优先探针，探针不可用时走 SSH
 	ViaAgent = "agent" // 强制走探针
 	ViaSSH   = "ssh"   // 强制走 SSH
+	// ViaCDT 表示这次动作是通过阿里云 CDT 的 API 做的，不经过机器本身。
+	// 好处是探针死了、SSH 连不上也照样能关，而且停机之后不再收实例费。
+	ViaCDT = "cdt"
 )
 
 // Outcome 是一次动作执行的结果。
@@ -38,10 +41,21 @@ type Executor struct {
 	st    *store.Store
 	ssh   *SSHRunner
 	agent AgentCommander
+	// cdt 用于「CDT 节省关机」这个超额动作。可以为 nil（没配阿里云账号时），
+	// 所有用到的地方都要判空。
+	cdt CDTStopper
 }
 
-func NewExecutor(st *store.Store, sshRunner *SSHRunner, agent AgentCommander) *Executor {
-	return &Executor{st: st, ssh: sshRunner, agent: agent}
+// CDTStopper 通过关联的阿里云 CDT 实例把机器停掉。
+//
+// 做成接口而不是直接依赖 internal/cdtctl，是为了让 action 的测试不必拖上
+// 整个阿里云客户端和数据库 —— 单测里塞一个假的就行。
+type CDTStopper interface {
+	StopNodeInstance(ctx context.Context, n *store.Node, reason string) (string, error)
+}
+
+func NewExecutor(st *store.Store, sshRunner *SSHRunner, agent AgentCommander, cdt CDTStopper) *Executor {
+	return &Executor{st: st, ssh: sshRunner, agent: agent, cdt: cdt}
 }
 
 // SSH 暴露底层 runner，供「测试连接」等场景直接使用。
@@ -190,6 +204,16 @@ func (e *Executor) RunExceedAction(ctx context.Context, n *store.Node, reason st
 		}
 		return e.Exec(ctx, n, n.ExceedCommand, ViaAuto, reason)
 
+	case store.ActionCDTStop:
+		if e.cdt == nil {
+			return nil, fmt.Errorf("超额动作设为「CDT 节省关机」，但面板没有配置阿里云账号")
+		}
+		msg, err := e.cdt.StopNodeInstance(ctx, n, reason)
+		if err != nil {
+			return nil, err
+		}
+		return &Outcome{Via: ViaCDT, Output: msg}, nil
+
 	default:
 		return nil, fmt.Errorf("未知的超额动作 %q", n.ActionOnExceed)
 	}
@@ -198,7 +222,7 @@ func (e *Executor) RunExceedAction(ctx context.Context, n *store.Node, reason st
 // ValidAction 判断超额动作是否合法。
 func ValidAction(a string) bool {
 	switch a {
-	case store.ActionNone, store.ActionDNSOnly, store.ActionShutdownAgent,
+	case store.ActionNone, store.ActionDNSOnly, store.ActionShutdownAgent, store.ActionCDTStop,
 		store.ActionShutdownSSH, store.ActionCommand:
 		return true
 	}

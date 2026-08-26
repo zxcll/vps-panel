@@ -9,36 +9,24 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/zxcll/vps-panel/internal/protocol"
+	"github.com/zxcll/vps-panel/internal/selfupdate"
 )
 
 // 探针自升级。
 //
 // 目标是让用户在面板上点一下就能把所有节点升到最新版，不用挨台 SSH。
 //
-// 整件事的核心风险只有一个：**把自己的二进制换坏了，探针就再也起不来了**，
-// 而这台机器很可能远在天边、SSH 凭据还未必配过。所以这里的每一步都必须
-// 能安全失败 —— 任何一步出问题，都要保证旧二进制原封不动。
+// 真正危险的那几步（下载到同目录临时文件、校验能不能跑、备份后原子替换、
+// 清理残留）全在 internal/selfupdate 里，面板自更新用的是同一份代码。
+// 这里只负责：从面板下载、把结果回给面板、然后退出让 systemd 拉起。
 //
-// 顺序是这样的：
-//
-//  1. 下载到**同目录**下的临时文件（同目录才能 rename，跨文件系统 rename 会失败）
-//  2. 校验它确实是个能跑的东西：ELF 魔数 + 实际执行 `--version`
-//  3. 备份旧二进制到 .old，再 rename 新的上去（rename 在同文件系统上是原子的）
-//  4. 先把结果回给面板，**然后**才退出
-//
-// 第 2 步是关键。只校验「下下来了」是不够的：反代返回一个 HTML 错误页、
-// 面板上放错了架构的二进制、传输被截断，这几种都能让你下到一个"看着有内容"
-// 但根本跑不起来的文件。真的执行一次 --version 是唯一能排除全部这些的办法。
-//
-// 第 4 步同样重要。反过来的话，面板永远只会看到"指令超时"，
-// 哪怕升级其实成功了。
+// 有一条顺序不能反：**先把结果发出去，再退出**。反过来的话，面板永远只会
+// 看到「指令超时」，哪怕升级其实成功了。
 
 // upgradeDownloadTimeout 是下载新二进制的超时。探针二进制约 10MB，
 // 给足时间让网络差的机器也能下完。
@@ -53,8 +41,15 @@ const upgradeExitDelay = 1500 * time.Millisecond
 const minAgentBinarySize = 2 << 20
 
 // tmpBinaryPrefix 是下载中的临时文件前缀。开头的点让它在 ls 里不碍眼，
-// 也方便 cleanupUpgradeLeftovers 认出哪些是自己留下的。
+// 也方便清理时认出哪些是自己留下的。
 const tmpBinaryPrefix = ".vps-agent-new-"
+
+// upgradeTarget 描述「怎么替换探针自己的二进制、怎么算校验通过」。
+var upgradeTarget = selfupdate.Target{
+	ExpectOutput: "vps-agent",
+	MinSize:      minAgentBinarySize,
+	TempPrefix:   tmpBinaryPrefix,
+}
 
 // upgrade 执行一次自升级。
 func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) protocol.CommandResult {
@@ -75,7 +70,7 @@ func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) proto
 		return upgradeOK(res)
 	}
 
-	exePath, err := currentBinaryPath()
+	exePath, err := upgradeTarget.Path()
 	if err != nil {
 		return upgradeFailed(res, err)
 	}
@@ -83,31 +78,24 @@ func (a *Agent) upgrade(ctx context.Context, req *protocol.UpgradeRequest) proto
 
 	a.log.Warn("收到面板下发的升级指令", "当前版本", Version, "目标版本", req.Version, "二进制", exePath)
 
-	// 先把上次可能留下的半截文件清掉，别让反复失败的升级把磁盘堆满。
-	cleanupUpgradeLeftovers(a.log)
-
-	tmpPath, size, err := a.downloadAgentBinary(ctx, exePath)
+	body, err := a.fetchAgentBinary(ctx)
 	if err != nil {
 		return upgradeFailed(res, err)
 	}
-	// 从这里开始，任何失败都要把临时文件清掉，旧二进制保持原样。
-	defer os.Remove(tmpPath)
+	defer body.Close()
 
-	res.SizeBytes = size
-
-	if err := verifyAgentBinary(ctx, tmpPath); err != nil {
-		return upgradeFailed(res, err)
-	}
-	if err := swapBinary(tmpPath, exePath, a.log); err != nil {
+	out, err := upgradeTarget.Apply(ctx, body, a.log)
+	if err != nil {
 		return upgradeFailed(res, err)
 	}
 
+	res.SizeBytes = out.SizeBytes
 	res.Replaced = true
 	res.Restarting = true
 	res.Message = fmt.Sprintf("已替换 %s（%.1f MB），探针即将退出，由 systemd 用新版本拉起",
-		exePath, float64(size)/(1<<20))
+		out.BinaryPath, float64(out.SizeBytes)/(1<<20))
 
-	a.log.Warn("升级完成，即将退出让 systemd 重启", "二进制", exePath, "大小", size)
+	a.log.Warn("升级完成，即将退出让 systemd 重启", "二进制", out.BinaryPath, "大小", out.SizeBytes)
 
 	// 先让结果发出去，再退出。反过来的话面板只会看到超时。
 	go a.exitForUpgrade()
@@ -128,80 +116,49 @@ func (a *Agent) exitForUpgrade() {
 	// 走一次正常的收尾：把最后一段流量补报上去再退出，
 	// 和收到 SIGTERM 时的处理保持一致，这样升级不会丢流量。
 	a.finalFlush()
-	os.Exit(0)
+	osExit(0)
 }
 
-// currentBinaryPath 找到当前进程的二进制路径。
-//
-// 要解符号链接：有些安装方式会把 /usr/local/bin/vps-agent 指到别处，
-// 直接往符号链接上 rename 会把链接本身替换掉，下次升级就找不到真身了。
-func currentBinaryPath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("定位探针自身的二进制路径失败: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	return exe, nil
-}
+// osExit 做成变量只为让单测能拦住它，别把测试进程本身退掉。
+var osExit = os.Exit
 
-// downloadAgentBinary 从面板下载对应架构的二进制，落到 exePath 的同目录下。
-//
-// 必须同目录：rename 只在同一个文件系统内是原子的。下到 /tmp 再 rename
-// 到 /usr/local/bin，在 /tmp 是 tmpfs 的机器上会直接失败。
-func (a *Agent) downloadAgentBinary(ctx context.Context, exePath string) (string, int64, error) {
+// fetchAgentBinary 从面板拉对应架构的探针二进制，返回响应体供调用方消费。
+func (a *Agent) fetchAgentBinary(ctx context.Context) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s?arch=%s", a.downloadEndpoint(), runtime.GOARCH)
 
 	dlCtx, cancel := context.WithTimeout(ctx, upgradeDownloadTimeout)
-	defer cancel()
-
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", 0, err
+		cancel()
+		return nil, err
 	}
 	req.Header.Set("X-Node-Secret", a.cfg.Secret)
 
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("从面板下载新版探针失败: %w", err)
+		cancel()
+		return nil, fmt.Errorf("从面板下载新版探针失败: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", 0, fmt.Errorf("面板返回 HTTP %d：%s",
+		resp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("面板返回 HTTP %d：%s",
 			resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	// 把 cancel 挂到 Close 上，别让 context 提前取消把下载掐断。
+	return &bodyWithCancel{ReadCloser: resp.Body, cancel: cancel}, nil
+}
 
-	dir := filepath.Dir(exePath)
-	tmp, err := os.CreateTemp(dir, tmpBinaryPrefix+"*")
-	if err != nil {
-		return "", 0, fmt.Errorf("在 %s 下创建临时文件失败: %w（这个目录可写吗？探针是以 root 跑的吗？）", dir, err)
-	}
-	tmpPath := tmp.Name()
+type bodyWithCancel struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
 
-	size, err := io.Copy(tmp, resp.Body)
-	closeErr := tmp.Close()
-	if err != nil {
-		os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("写入新版探针失败: %w", err)
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("关闭临时文件失败: %w", closeErr)
-	}
-
-	if size < minAgentBinarySize {
-		os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("下到的文件只有 %d 字节，不可能是探针二进制"+
-			"（面板上放的可能是错误页面，或者 %s 架构的二进制没准备好）", size, runtime.GOARCH)
-	}
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		os.Remove(tmpPath)
-		return "", 0, fmt.Errorf("给新版探针加执行权限失败: %w", err)
-	}
-	return tmpPath, size, nil
+func (b *bodyWithCancel) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // downloadEndpoint 拼出面板的二进制下载地址。
@@ -212,119 +169,9 @@ func (a *Agent) downloadEndpoint() string {
 	return "http://" + a.host + "/agent/download"
 }
 
-// elfMagic 是 ELF 文件的前四个字节。
-var elfMagic = []byte{0x7f, 'E', 'L', 'F'}
-
-// verifyAgentBinary 确认这个文件真的是一个能跑的探针。
-//
-// 两道关：
-//
-//   - ELF 魔数：挡掉反代返回的 HTML 错误页、下了一半的文件。
-//   - 真的执行一次 `--version`：这才是决定性的一道。架构不对
-//     （给 arm64 机器下了 amd64 的）、动态链接缺库、文件被截断，
-//     都只有真跑一次才暴露得出来。
-//
-// 少了第二道，最坏情况是把一个跑不起来的东西装上去，然后 systemd
-// 每 5 秒重启一次、永远起不来 —— 而机器在天边，只能 SSH 上去手工救。
-func verifyAgentBinary(ctx context.Context, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("打开新版探针失败: %w", err)
-	}
-	head := make([]byte, 4)
-	n, readErr := io.ReadFull(f, head)
-	f.Close()
-	if readErr != nil || n < 4 {
-		return fmt.Errorf("读不出新版探针的文件头，下载可能不完整")
-	}
-	if string(head) != string(elfMagic) {
-		return fmt.Errorf("下到的不是 Linux 可执行文件（文件头是 %q）"+
-			"，多半是反代返回了错误页面而不是二进制", string(head))
-	}
-
-	verCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(verCtx, path, "--version").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("新版探针跑不起来（%w），已放弃升级，旧版本保持原样。"+
-			"输出：%s", err, strings.TrimSpace(string(out)))
-	}
-	if !strings.Contains(string(out), "vps-agent") {
-		return fmt.Errorf("新版探针的 --version 输出对不上（%q），"+
-			"面板上放的可能不是这个项目的二进制",
-			strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// swapBinary 把新二进制换上去，旧的留一份 .old。
-//
-// 留 .old 是为了救命：真出了「新版起不来」的情况，SSH 上去
-// `mv vps-agent.old vps-agent` 就能立刻回滚，不用重新跑安装脚本、
-// 更不用在一台已经连不上面板的机器上想办法联网。
-//
-// **只留一份。** 每次升级前先把上一份删掉，所以升多少次都只多占一个
-// 二进制的空间（约 7MB），不会随升级次数越堆越多。
-//
-// 注意用 rename 而不是覆盖写：Linux 不允许写一个正在执行的文件
-// （ETXTBSY），但允许 rename 掉它 —— 老的 inode 会一直活到进程退出。
-func swapBinary(tmpPath, exePath string, log *slog.Logger) error {
-	backup := exePath + ".old"
-	// 先删掉上一次的备份，再把当前这份链过去。
-	// 用硬链接而不是复制：链接不额外占空间，等下面 rename 把原名挪走之后，
-	// 那个 inode 就靠 .old 这个名字继续活着，正好是我们要的。
-	_ = os.Remove(backup)
-	if err := os.Link(exePath, backup); err != nil && log != nil {
-		// 备份失败不致命，升级照做，只是少了本地回滚的便利。
-		log.Warn("留旧版本备份失败，升级继续但没有本地回滚点", "备份路径", backup, "err", err)
-	}
-
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		return fmt.Errorf("替换探针二进制失败: %w（%s 可写吗？探针是以 root 跑的吗？）",
-			err, filepath.Dir(exePath))
-	}
-	return nil
-}
-
-// cleanupUpgradeLeftovers 清掉上次升级留下的垃圾。
-//
-// 要清的是下载到一半的临时文件（.vps-agent-new-*）。正常路径上它们要么被
-// rename 成正式二进制、要么在失败时被删掉；但**进程在下载中途被杀**
-// （机器重启、OOM、systemd stop）就没人收拾了，反复几次就会在
-// /usr/local/bin 下堆出一串七八兆的碎片。
-//
-// 探针启动时和每次升级前各调一次。启动时调是安全的：这时候不可能有
-// 正在进行的升级，凡是留在那儿的临时文件都是孤儿。
+// cleanupUpgradeLeftovers 清掉上次升级留下的半截文件。探针启动时调一次。
 func cleanupUpgradeLeftovers(log *slog.Logger) {
-	exePath, err := currentBinaryPath()
-	if err != nil {
-		return
-	}
-	cleanupTempFilesIn(filepath.Dir(exePath), log)
-}
-
-// cleanupTempFilesIn 清掉某个目录下所有升级临时文件。拆出来是为了能单测。
-func cleanupTempFilesIn(dir string, log *slog.Logger) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), tmpBinaryPrefix) {
-			continue
-		}
-		p := filepath.Join(dir, e.Name())
-		if err := os.Remove(p); err != nil {
-			if log != nil {
-				log.Debug("清理升级残留失败", "文件", p, "err", err)
-			}
-			continue
-		}
-		if log != nil {
-			log.Info("清掉了上次升级留下的临时文件", "文件", p)
-		}
-	}
+	upgradeTarget.CleanupLeftovers(log)
 }
 
 func upgradeOK(res protocol.UpgradeResult) protocol.CommandResult {

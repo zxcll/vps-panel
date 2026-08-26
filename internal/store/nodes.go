@@ -15,7 +15,7 @@ const nodeColumns = `id, name, remark, secret, ipv4, ipv6,
 	reset_day, reset_tz, cycle_start, cycle_end,
 	action_on_exceed, exceed_command, auto_recover_on_reset,
 	ssh_host, ssh_port, ssh_user, ssh_auth, ssh_secret_enc, ssh_key_pass_enc,
-	ssh_host_key, ssh_use_sudo, probe_port,
+	ssh_host_key, ssh_use_sudo, probe_port, cdt_instance_id,
 	status, last_seen, enabled, exceed_handled_at, warn_handled_at,
 	created_at, updated_at`
 
@@ -31,7 +31,7 @@ func scanNode(sc interface{ Scan(...any) error }) (*Node, error) {
 		&n.ResetDay, &n.ResetTZ, &cycleStart, &cycleEnd,
 		&n.ActionOnExceed, &n.ExceedCommand, &autoRecover,
 		&n.SSHHost, &n.SSHPort, &n.SSHUser, &n.SSHAuth, &n.SSHSecretEnc, &n.SSHKeyPassEnc,
-		&n.SSHHostKey, &useSudo, &n.ProbePort,
+		&n.SSHHostKey, &useSudo, &n.ProbePort, &n.CDTInstanceID,
 		&n.Status, &lastSeen, &enabled, &exceedAt, &warnAt,
 		&createdAt, &updatedAt,
 	)
@@ -103,15 +103,15 @@ func (s *Store) CreateNode(ctx context.Context, n *Node) error {
 			reset_day, reset_tz, cycle_start, cycle_end,
 			action_on_exceed, exceed_command, auto_recover_on_reset,
 			ssh_host, ssh_port, ssh_user, ssh_auth, ssh_secret_enc, ssh_key_pass_enc,
-			ssh_host_key, ssh_use_sudo, probe_port,
+			ssh_host_key, ssh_use_sudo, probe_port, cdt_instance_id,
 			status, enabled, created_at, updated_at
-		) VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?)`,
+		) VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?,?,?, ?,?,?,?, ?,?,?,?)`,
 		n.Name, n.Remark, n.Secret, n.IPv4, n.IPv6,
 		n.QuotaBytes, n.BillingMode, n.TrafficRatio, n.WarnPercent,
 		n.ResetDay, n.ResetTZ, timeVal(n.CycleStart), timeVal(n.CycleEnd),
 		n.ActionOnExceed, n.ExceedCommand, boolInt(n.AutoRecoverOnReset),
 		n.SSHHost, n.SSHPort, n.SSHUser, n.SSHAuth, n.SSHSecretEnc, n.SSHKeyPassEnc,
-		n.SSHHostKey, boolInt(n.SSHUseSudo), n.ProbePort,
+		n.SSHHostKey, boolInt(n.SSHUseSudo), n.ProbePort, n.CDTInstanceID,
 		n.Status, boolInt(n.Enabled), timeVal(now), timeVal(now),
 	)
 	if err != nil {
@@ -145,7 +145,7 @@ func (s *Store) UpdateNode(ctx context.Context, n *Node) error {
 			action_on_exceed=?, exceed_command=?, auto_recover_on_reset=?,
 			ssh_host=?, ssh_port=?, ssh_user=?, ssh_auth=?,
 			ssh_secret_enc=?, ssh_key_pass_enc=?, ssh_host_key=?, ssh_use_sudo=?,
-			probe_port=?, enabled=?, updated_at=?
+			probe_port=?, cdt_instance_id=?, enabled=?, updated_at=?
 		WHERE id=?`,
 		n.Name, n.Remark, n.IPv4, n.IPv6,
 		n.QuotaBytes, n.BillingMode, n.TrafficRatio, n.WarnPercent,
@@ -153,7 +153,7 @@ func (s *Store) UpdateNode(ctx context.Context, n *Node) error {
 		n.ActionOnExceed, n.ExceedCommand, boolInt(n.AutoRecoverOnReset),
 		n.SSHHost, n.SSHPort, n.SSHUser, n.SSHAuth,
 		n.SSHSecretEnc, n.SSHKeyPassEnc, n.SSHHostKey, boolInt(n.SSHUseSudo),
-		n.ProbePort, boolInt(n.Enabled), timeVal(now), n.ID,
+		n.ProbePort, n.CDTInstanceID, boolInt(n.Enabled), timeVal(now), n.ID,
 	)
 	if err != nil {
 		return err

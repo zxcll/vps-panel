@@ -191,6 +191,20 @@ func eligible(s *NodeState, rec *store.DNSRecord, confirmedDown bool) (bool, str
 	if n.Status == store.StatusStopped {
 		return false, "节点已被面板关停"
 	}
+	// 计划内停机（CDT 定时关机 / 流量熔断）默认**不算**切换理由：
+	// 那是面板自己安排的，不是故障，按故障处理会造成没必要的解析抖动。
+	//
+	// 代价得说清楚：不切的话，停机期间域名会一直指着一台关着的机器。
+	// 想让它照常切走，就在这条记录上打开 switch_on_planned_stop。
+	//
+	// 注意这个判断必须在下面 confirmedDown 那条**之前**：计划内停机的机器
+	// 拨测一定不通，落到那条分支就被当成故障切走了。
+	if n.Status == store.StatusPlannedStop {
+		if rec.SwitchOnPlannedStop {
+			return false, "计划内停机（已开启「计划内停机也切换」）"
+		}
+		return true, ""
+	}
 	if rec.SwitchOnExceed && s.Quota.Exceeded {
 		return false, "流量已超额"
 	}

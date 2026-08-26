@@ -23,6 +23,12 @@ const (
 	KeyTelegramToken  = "notify_telegram_token"
 	KeyTelegramChatID = "notify_telegram_chat_id"
 	KeyWebhookURL     = "notify_webhook_url"
+	// KeyNotifyNodeOnline 控制节点上线/恢复要不要发通知。
+	// 掉线通知一直是刚需，上线通知有人会嫌吵，所以给个开关。
+	KeyNotifyNodeOnline = "notify_node_online"
+	// KeyGitHubProxy 是查更新和下二进制用的加速前缀，
+	// 语义和 install.sh 的 GITHUB_PROXY 一致。
+	KeyGitHubProxy = "github_proxy"
 )
 
 // Settings 是运行期可调参数的集合（存在 settings 表，面板上可改）。
@@ -37,6 +43,11 @@ type Settings struct {
 	TelegramToken  string `json:"notify_telegram_token"`
 	TelegramChatID string `json:"notify_telegram_chat_id"`
 	WebhookURL     string `json:"notify_webhook_url"`
+	// NotifyNodeOnline 为真时，节点上线/恢复也发通知（默认开）。
+	NotifyNodeOnline bool `json:"notify_node_online"`
+
+	// GitHubProxy 是面板自更新用的加速前缀。留空即直连 GitHub。
+	GitHubProxy string `json:"github_proxy"`
 }
 
 func DefaultSettings() Settings {
@@ -47,6 +58,7 @@ func DefaultSettings() Settings {
 		TCPProbeEnabled:   true,
 		TCPProbeTimeoutMS: 5000,
 		HourlyRetainDays:  180,
+		NotifyNodeOnline:  true,
 	}
 }
 
@@ -108,9 +120,13 @@ func (s *Store) LoadSettings(ctx context.Context) (Settings, error) {
 	if v, ok := m[KeyTCPProbeEnabled]; ok {
 		cfg.TCPProbeEnabled = v == "1" || v == "true"
 	}
+	if v, ok := m[KeyNotifyNodeOnline]; ok {
+		cfg.NotifyNodeOnline = v == "1" || v == "true"
+	}
 	cfg.TelegramToken = m[KeyTelegramToken]
 	cfg.TelegramChatID = m[KeyTelegramChatID]
 	cfg.WebhookURL = m[KeyWebhookURL]
+	cfg.GitHubProxy = m[KeyGitHubProxy]
 
 	return cfg, nil
 }
@@ -126,6 +142,8 @@ func (s *Store) SaveSettings(ctx context.Context, cfg Settings) error {
 		KeyTelegramToken:     cfg.TelegramToken,
 		KeyTelegramChatID:    cfg.TelegramChatID,
 		KeyWebhookURL:        cfg.WebhookURL,
+		KeyNotifyNodeOnline:  boolStr(cfg.NotifyNodeOnline),
+		KeyGitHubProxy:       cfg.GitHubProxy,
 	}
 	for k, v := range pairs {
 		if err := s.SetSetting(ctx, k, v); err != nil {

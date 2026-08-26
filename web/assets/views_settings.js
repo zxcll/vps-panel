@@ -24,7 +24,45 @@ export const SettingsView = {
             }
         }
 
-        onMounted(load);
+        // --- 面板版本与自更新 ---
+        const ver = ref({});
+        const checking = ref(false);
+        const upgrading = ref(false);
+
+        async function checkVersion(force = false) {
+            checking.value = true;
+            try {
+                ver.value = await api("/api/panel/version" + (force ? "?refresh=1" : ""));
+            } catch (e) {
+                toast(e.message, "error");
+            } finally {
+                checking.value = false;
+            }
+        }
+
+        async function upgradePanel() {
+            if (!window.confirm(
+                `确定把面板从 ${ver.value.current_version} 升到 ${ver.value.latest_version} 吗？\n\n` +
+                `面板会下载新二进制、校验它能正常运行之后再替换自己，然后重启（约 5 秒）。\n` +
+                `校验不过就不会动旧版本。数据库和配置都不受影响。`)) return;
+
+            upgrading.value = true;
+            try {
+                const res = await api("/api/panel/upgrade", { method: "POST", body: {} });
+                toast(res.message, "success", 15000);
+                // 面板正在重启，等它起来再刷新版本信息。
+                setTimeout(() => checkVersion(true).then(load), 8000);
+            } catch (e) {
+                toast(e.message, "error", 15000);
+            } finally {
+                upgrading.value = false;
+            }
+        }
+
+        onMounted(() => {
+            load();
+            checkVersion();
+        });
 
         async function save() {
             saving.value = true;
@@ -39,6 +77,8 @@ export const SettingsView = {
                     notify_telegram_token: cfg.notify_telegram_token || "",
                     notify_telegram_chat_id: cfg.notify_telegram_chat_id || "",
                     notify_webhook_url: cfg.notify_webhook_url || "",
+                    notify_node_online: !!cfg.notify_node_online,
+                    github_proxy: cfg.github_proxy || "",
                     telegram_token_changed: tokenTouched.value,
                 };
                 Object.assign(cfg, await api("/api/settings", { method: "PUT", body }));
@@ -75,14 +115,68 @@ export const SettingsView = {
             }
         }
 
-        return { cfg, loading, saving, save, pw, pwSaving, changePassword, tokenTouched };
+        return {
+            cfg, loading, saving, save, pw, pwSaving, changePassword, tokenTouched,
+            ver, checking, upgrading, checkVersion, upgradePanel,
+        };
     },
     template: `
         <div>
             <div class="page-head">
                 <div>
                     <h1>设置</h1>
-                    <p>多久算掉线、切换的防抖参数、通知渠道，以及登录密码</p>
+                    <p>面板版本、多久算掉线、切换的防抖参数、通知渠道，以及登录密码</p>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:18px">
+                <div class="page-head" style="margin-bottom:10px">
+                    <div class="card-title">面板版本</div>
+                    <div class="btn-row">
+                        <button class="btn small" :disabled="checking" @click="checkVersion(true)">
+                            <span v-if="checking" class="spinner"></span>检查更新
+                        </button>
+                        <button v-if="ver.has_update" class="btn small primary"
+                                :disabled="upgrading" @click="upgradePanel">
+                            <span v-if="upgrading" class="spinner"></span>
+                            升级到 {{ ver.latest_version }}
+                        </button>
+                    </div>
+                </div>
+
+                <div class="node-meta">
+                    当前 <b class="tabular">{{ ver.current_version || '—' }}</b>
+                    <template v-if="ver.arch"> · {{ ver.arch }}</template>
+                    <template v-if="ver.latest_version">
+                        · 最新 <b class="tabular">{{ ver.latest_version }}</b>
+                    </template>
+                    <template v-if="ver.binary_path"> · {{ ver.binary_path }}</template>
+                </div>
+
+                <div v-if="ver.check_error" class="notice error" style="margin-top:10px">
+                    检查更新失败：{{ ver.check_error }}
+                </div>
+                <div v-else-if="ver.has_update" class="notice" style="margin-top:10px">
+                    有新版本 <b>{{ ver.latest_version }}</b>。
+                    面板会下载新二进制、<b>先校验它能正常运行</b>再替换自己，然后重启（约 5 秒）——
+                    校验不过就不动旧版本，旧版还会留一份 <code>.old</code> 可以随时换回去。
+                    数据库、配置、主密钥都不受影响。
+                    <details v-if="ver.release_notes" style="margin-top:8px">
+                        <summary style="cursor:pointer">更新内容</summary>
+                        <pre style="white-space:pre-wrap;margin:8px 0 0">{{ ver.release_notes }}</pre>
+                    </details>
+                </div>
+                <div v-else-if="ver.latest_version" class="node-meta" style="margin-top:10px">
+                    已经是最新版。
+                </div>
+
+                <div class="field" style="margin-top:12px">
+                    <label>GitHub 加速前缀</label>
+                    <input type="text" v-model="cfg.github_proxy" placeholder="如 https://ghfast.top/">
+                    <div class="field-hint">
+                        国内机器直连 GitHub 检查更新会失败，填一个加速前缀即可。
+                        和安装脚本的 GITHUB_PROXY 是一个意思。留空表示直连。
+                    </div>
                 </div>
             </div>
 
@@ -164,8 +258,18 @@ export const SettingsView = {
                             面板会往这个地址 POST 一个 JSON，字段为 level / title / body / node_name / time
                         </div>
                     </div>
-                    <div class="field-hint">
-                        会推送的事件：节点离线与恢复、流量预警、流量耗尽、超额动作执行结果、域名切换、周期清零。
+                    <label class="checkbox-label" style="margin-top:4px">
+                        <input type="checkbox" v-model="cfg.notify_node_online">
+                        节点上线 / 恢复时也发通知
+                    </label>
+                    <div class="field-hint" style="margin-top:4px">
+                        覆盖三种情况：探针第一次接入、掉线后恢复、从计划内停机中开机。
+                        掉线通知一直会发，不受这个开关影响。
+                    </div>
+                    <div class="field-hint" style="margin-top:8px">
+                        会推送的事件：节点离线与恢复、流量预警、流量耗尽、超额动作执行结果、
+                        域名切换、周期清零、阿里云 CDT 熔断与保活。<br>
+                        <b>计划内停机不会发掉线告警</b> —— 那是面板自己按计划停的，不是故障。
                     </div>
                 </div>
 
@@ -230,7 +334,45 @@ export const EventsView = {
             }
         }
 
-        onMounted(load);
+        // --- 面板版本与自更新 ---
+        const ver = ref({});
+        const checking = ref(false);
+        const upgrading = ref(false);
+
+        async function checkVersion(force = false) {
+            checking.value = true;
+            try {
+                ver.value = await api("/api/panel/version" + (force ? "?refresh=1" : ""));
+            } catch (e) {
+                toast(e.message, "error");
+            } finally {
+                checking.value = false;
+            }
+        }
+
+        async function upgradePanel() {
+            if (!window.confirm(
+                `确定把面板从 ${ver.value.current_version} 升到 ${ver.value.latest_version} 吗？\n\n` +
+                `面板会下载新二进制、校验它能正常运行之后再替换自己，然后重启（约 5 秒）。\n` +
+                `校验不过就不会动旧版本。数据库和配置都不受影响。`)) return;
+
+            upgrading.value = true;
+            try {
+                const res = await api("/api/panel/upgrade", { method: "POST", body: {} });
+                toast(res.message, "success", 15000);
+                // 面板正在重启，等它起来再刷新版本信息。
+                setTimeout(() => checkVersion(true).then(load), 8000);
+            } catch (e) {
+                toast(e.message, "error", 15000);
+            } finally {
+                upgrading.value = false;
+            }
+        }
+
+        onMounted(() => {
+            load();
+            checkVersion();
+        });
 
         function setLevel(l) {
             level.value = l;

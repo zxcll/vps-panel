@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/zxcll/vps-panel/internal/store"
 )
@@ -107,6 +108,15 @@ func validateSettings(cfg *store.Settings) error {
 	}
 	if cfg.HourlyRetainDays < 7 || cfg.HourlyRetainDays > 3650 {
 		return fmt.Errorf("流量曲线保留天数需要在 7 ~ 3650 之间")
+	}
+	// 加速前缀会被拼在 GitHub 地址前面，不是 http(s) 开头的话拼出来一定不对，
+	// 而失败要等到点「检查更新」才暴露，不如现在就挡住。
+	cfg.GitHubProxy = strings.TrimSpace(cfg.GitHubProxy)
+	if cfg.GitHubProxy != "" &&
+		!strings.HasPrefix(cfg.GitHubProxy, "http://") &&
+		!strings.HasPrefix(cfg.GitHubProxy, "https://") {
+		return fmt.Errorf("GitHub 加速前缀 %q 不合法，要以 http:// 或 https:// 开头（如 https://ghfast.top/）",
+			cfg.GitHubProxy)
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zxcll/vps-panel/internal/action"
+	"github.com/zxcll/vps-panel/internal/cdtctl"
 	"github.com/zxcll/vps-panel/internal/config"
 	"github.com/zxcll/vps-panel/internal/crypto"
 	"github.com/zxcll/vps-panel/internal/engine"
@@ -41,6 +42,10 @@ type Server struct {
 	fwdSync *forwardSyncer
 	// cdt 是阿里云 CDT 后台循环的状态：账号级动作锁 + 各档子任务的分频计时。
 	cdt *cdtGuard
+	// rel 缓存 GitHub 上的最新版信息，并保证同一时刻只有一个自更新在跑。
+	rel *releaseCache
+	// cdtCtl 是「拿库里的凭据去操作阿里云实例」那一层，和超额动作共用同一份。
+	cdtCtl *cdtctl.Controller
 }
 
 func New(
@@ -53,6 +58,7 @@ func New(
 	fo *failover.Manager,
 	eng *engine.Engine,
 	n *notify.Notifier,
+	cdtCtl *cdtctl.Controller,
 	log *slog.Logger,
 ) *Server {
 	return &Server{
@@ -61,6 +67,8 @@ func New(
 		trustProxy: cfg.TrustProxyHeaders,
 		fwdSync:    newForwardSyncer(),
 		cdt:        newCDTGuard(),
+		rel:        &releaseCache{},
+		cdtCtl:     cdtCtl,
 	}
 }
 
@@ -147,6 +155,10 @@ func (s *Server) Handler() http.Handler {
 	auth("POST /api/cdt/instances/{id}/start", s.handleStartCDTInstance)
 	auth("POST /api/cdt/instances/{id}/stop", s.handleStopCDTInstance)
 	auth("POST /api/cdt/instances/{id}/guard", s.handleGuardCDTInstance)
+
+	// 面板自更新。
+	auth("GET /api/panel/version", s.handlePanelVersion)
+	auth("POST /api/panel/upgrade", s.handlePanelUpgrade)
 
 	auth("GET /api/events", s.handleListEvents)
 	auth("GET /api/settings", s.handleGetSettings)

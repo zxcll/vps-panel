@@ -171,12 +171,20 @@ type nodeRequest struct {
 	SSHHostKey *string `json:"ssh_host_key"` // 传空串可清掉，触发重新 TOFU
 	SSHUseSudo bool    `json:"ssh_use_sudo"`
 
-	ProbePort int  `json:"probe_port"`
-	Enabled   bool `json:"enabled"`
+	ProbePort int `json:"probe_port"`
+	// CDTInstanceID 关联到哪个阿里云 CDT 实例，0 = 不关联。
+	CDTInstanceID int64 `json:"cdt_instance_id"`
+	Enabled       bool  `json:"enabled"`
 }
 
 // validate 校验并规整请求，返回给用户看的错误。
 func (req *nodeRequest) validate() error {
+	// 「CDT 节省关机」得知道去停哪台机器。在这里挡住，
+	// 总比等到流量真跑满、该关机时才发现没配好要强得多。
+	if req.ActionOnExceed == store.ActionCDTStop && req.CDTInstanceID == 0 {
+		return fmt.Errorf("超额动作选了「CDT 节省关机」，但没有关联阿里云 CDT 实例。" +
+			"请在「阿里云 CDT 关联」里选一个，否则流量跑满时面板不知道该停哪台机器")
+	}
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return fmt.Errorf("节点名称不能为空")
@@ -295,6 +303,7 @@ func (s *Server) applyTo(n *store.Node, req *nodeRequest) error {
 	n.SSHAuth = req.SSHAuth
 	n.SSHUseSudo = req.SSHUseSudo
 	n.ProbePort = req.ProbePort
+	n.CDTInstanceID = req.CDTInstanceID
 	n.Enabled = req.Enabled
 
 	if req.SSHSecret != nil {

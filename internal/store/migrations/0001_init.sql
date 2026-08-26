@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS nodes (
 
     -- 健康探测
     probe_port            INTEGER NOT NULL DEFAULT 0,   -- 0 表示复用 ssh_port
+    -- 关联的阿里云 CDT 实例（cdt_instances.id），0 = 未关联。
+    -- 老库里没有这一列，由 store.addMissingColumns 补上。
+    cdt_instance_id       INTEGER NOT NULL DEFAULT 0,
 
     -- 状态
     status                TEXT    NOT NULL DEFAULT 'unknown', -- unknown|online|offline|exceeded|stopped
@@ -119,6 +122,8 @@ CREATE TABLE IF NOT EXISTS dns_records (
     switch_on_exceed  INTEGER NOT NULL DEFAULT 1,
     switch_on_offline INTEGER NOT NULL DEFAULT 1,
     switch_on_warn    INTEGER NOT NULL DEFAULT 0,
+    -- 计划内停机算不算切换理由。默认关：那是面板自己安排的，不是故障。
+    switch_on_planned_stop INTEGER NOT NULL DEFAULT 0,
     current_node_id   INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
     current_value     TEXT    NOT NULL DEFAULT '',
     last_switch_at    INTEGER,
