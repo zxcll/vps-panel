@@ -124,6 +124,7 @@ var pendingColumns = []newColumn{
 	{"cdt_accounts", "sync_interval_sec", "INTEGER NOT NULL DEFAULT 300"},
 	{"nodes", "cdt_instance_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"dns_records", "switch_on_planned_stop", "INTEGER NOT NULL DEFAULT 0"},
+	{"cdt_instances", "planned_stop", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func (s *Store) addMissingColumns() error {

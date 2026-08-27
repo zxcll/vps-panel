@@ -16,17 +16,19 @@ import (
 
 	"github.com/zxcll/vps-panel/internal/alicloud"
 	"github.com/zxcll/vps-panel/internal/crypto"
+	"github.com/zxcll/vps-panel/internal/notify"
 	"github.com/zxcll/vps-panel/internal/store"
 )
 
 type Controller struct {
-	st     *store.Store
-	cipher *crypto.Cipher
-	log    *slog.Logger
+	st       *store.Store
+	cipher   *crypto.Cipher
+	notifier *notify.Notifier
+	log      *slog.Logger
 }
 
-func New(st *store.Store, cipher *crypto.Cipher, log *slog.Logger) *Controller {
-	return &Controller{st: st, cipher: cipher, log: log}
+func New(st *store.Store, cipher *crypto.Cipher, n *notify.Notifier, log *slog.Logger) *Controller {
+	return &Controller{st: st, cipher: cipher, notifier: n, log: log}
 }
 
 // ClientFor 用库里存的凭据构造一个阿里云客户端。
@@ -149,14 +151,32 @@ func (c *Controller) MarkNodePlannedStop(ctx context.Context, instanceID int64, 
 
 // ClearNodePlannedStop 把关联节点从「计划内停机」放出来。
 //
-// 只清 planned_stop 这一个状态，置回 unknown 让 engine 顺着心跳自然恢复成
-// online —— 直接写 online 是不对的，机器刚下开机指令，探针还没连回来。
+// 置回 offline 而不是 unknown：unknown 的语义是「探针从来没上报过」，
+// 而这台机器只是刚开机、探针还没连回来。置成 offline 之后，探针一上报
+// engine 就会走 offline → online 那条路，一切照常。
+//
+// 「节点已开机」这条通知在这里发，**因为只有这里知道**这是一次计划内的恢复。
+// 放到 engine 里判断是不行的：那边看到的只是一个状态翻转，
+// 分不清是机器自己活过来了还是面板把它开起来的。
 func (c *Controller) ClearNodePlannedStop(ctx context.Context, instanceID int64) {
 	n, err := c.NodeForInstance(ctx, instanceID)
 	if err != nil || n == nil || n.Status != store.StatusPlannedStop {
 		return
 	}
-	if err := c.st.SetNodeStatus(ctx, n.ID, store.StatusUnknown); err != nil && c.log != nil {
-		c.log.Warn("解除节点计划内停机失败", "节点", n.Name, "err", err)
+	if err := c.st.SetNodeStatus(ctx, n.ID, store.StatusOffline); err != nil {
+		if c.log != nil {
+			c.log.Warn("解除节点计划内停机失败", "节点", n.Name, "err", err)
+		}
+		return
+	}
+	id := n.ID
+	c.st.AddEvent(ctx, &id, store.EventCDTAction, store.LevelInfo,
+		fmt.Sprintf("节点「%s」的计划内停机结束，实例已开机", n.Name))
+	if c.notifier != nil {
+		c.notifier.Send(notify.Message{
+			Level: store.LevelInfo, Title: "节点已开机",
+			Body:   fmt.Sprintf("节点「%s」的计划内停机结束，实例已重新开机", n.Name),
+			NodeID: n.ID, NodeName: n.Name,
+		})
 	}
 }

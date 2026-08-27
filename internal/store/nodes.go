@@ -176,15 +176,43 @@ func (s *Store) SetNodeStatus(ctx context.Context, id int64, status string) erro
 	return err
 }
 
-// TouchNode 记录心跳时间并把状态标为在线。
-// 已经超额/被关停的节点不覆盖状态 —— 探针在关机前的最后几次心跳不该把状态刷回 online。
-func (s *Store) TouchNode(ctx context.Context, id int64, seen time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
+// panelOwnedStatuses 是「面板说了算、心跳不能覆盖」的那几个状态。
+//
+// 共同点：机器确实不在跑，而**原因面板自己清楚**。探针在执行关机前还会
+// 再报几次心跳，那几次不该把状态刷回 online —— 刷回去之后，等机器真的
+// 断电，就会被当成一次意外掉线，白发一条告警。
+//
+// 这个列表和 engine.isManagedDown 是同一组状态，改一处就得改另一处。
+// 拼进 SQL 而不是写死字符串，是为了让它跟着 Go 常量走，加新状态时
+// 至少还有个地方能 grep 到。
+var panelOwnedStatuses = []string{StatusExceeded, StatusStopped, StatusPlannedStop}
+
+// touchNodeSQL 把上面那组状态拼成 CASE WHEN status IN (...) 的形式。
+var touchNodeSQL = buildTouchNodeSQL()
+
+func buildTouchNodeSQL() string {
+	quoted := make([]string, 0, len(panelOwnedStatuses))
+	for _, s := range panelOwnedStatuses {
+		quoted = append(quoted, "'"+s+"'")
+	}
+	return `
 		UPDATE nodes SET
 			last_seen = ?,
-			status = CASE WHEN status IN ('exceeded','stopped') THEN status ELSE 'online' END,
+			status = CASE WHEN status IN (` + strings.Join(quoted, ",") + `)
+			              THEN status ELSE 'online' END,
 			updated_at = ?
-		WHERE id = ?`,
+		WHERE id = ?`
+}
+
+// TouchNode 记录心跳时间并把状态标为在线。
+//
+// 注意这条路走的是**每一次上报**，比 engine 的 30 秒轮询频繁得多。
+// 所以「哪些状态不能被心跳覆盖」这件事必须在这里也守住 —— 只在 engine 里
+// 守是不够的，心跳会抢先把状态改掉。planned_stop 就在这里漏过一次：
+// 定时关机之后，关机窗口里的每一次心跳都把节点刷成 online，
+// 等机器真断电就误报了一条掉线。
+func (s *Store) TouchNode(ctx context.Context, id int64, seen time.Time) error {
+	_, err := s.db.ExecContext(ctx, touchNodeSQL,
 		timeVal(seen), timeVal(time.Now().UTC()), id)
 	return err
 }

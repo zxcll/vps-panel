@@ -133,12 +133,22 @@ func (e *Engine) syncLiveness(ctx context.Context, s *failover.NodeState, cfg st
 
 	reporting := s.AgentOnline || s.HeartbeatFresh
 
-	// 被超额/关停/计划内停机接管的节点，**离线**方向不参与覆盖 ——
-	// 那几个状态本来就意味着机器不在跑，再翻成 offline 只会盖掉更有信息量的状态，
-	// 还会顺带发一条毫无意义的掉线告警。
+	// planned_stop 是**面板独占**的状态，探针心跳两个方向都碰不得。
 	//
-	// 但**上线**方向要放行：机器回来了就该恢复成 online 并通知一声，
-	// 否则一台从计划内停机里醒过来的机器会永远显示成停机状态。
+	// 这里踩过一个坑：原本允许「上线方向」把它翻回 online，结果 ——
+	// 定时关机发出去之后，机器还要几十秒才真正断电，这期间探针**还在上报**，
+	// 于是状态被翻回 online；等机器真关掉，就落进了下面的离线分支，
+	// 白发一条掉线告警。用户看到的现象正是「关联了 CDT 还是收到离线通知」。
+	//
+	// 所以解除交给 CDT 那边：它盯着实例的**真实状态**，看到 Running 才放行
+	// （见 cdtSyncInstances）。那才是「机器真的回来了」的可靠信号。
+	if n.Status == store.StatusPlannedStop {
+		return
+	}
+
+	// 超额/关停同理，**离线**方向不参与覆盖：那两个状态本来就意味着机器不在跑，
+	// 再翻成 offline 只会盖掉更有信息量的状态，还会顺带发一条没意义的掉线告警。
+	// 上线方向放行，机器回来了该恢复成 online 并通知一声。
 	if isManagedDown(n.Status) && !reporting {
 		return
 	}

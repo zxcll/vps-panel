@@ -104,13 +104,12 @@ func (t *Tx) AddHourly(ctx context.Context, nodeID int64, hour time.Time, drx, d
 }
 
 // TouchNode 是 Store.TouchNode 的事务内版本。
+//
+// **上报路径真正走的是这一条**（入账和心跳在同一个事务里）。两处必须用
+// 同一份 SQL —— 之前它们是各写一遍字符串的，加 planned_stop 时只改了一处
+// 就等于没改。现在共用 touchNodeSQL，改不漏。
 func (t *Tx) TouchNode(ctx context.Context, id int64, seen time.Time) error {
-	_, err := t.tx.ExecContext(ctx, `
-		UPDATE nodes SET
-			last_seen = ?,
-			status = CASE WHEN status IN ('exceeded','stopped') THEN status ELSE 'online' END,
-			updated_at = ?
-		WHERE id = ?`,
+	_, err := t.tx.ExecContext(ctx, touchNodeSQL,
 		timeVal(seen), timeVal(time.Now().UTC()), id)
 	return err
 }

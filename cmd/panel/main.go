@@ -131,7 +131,7 @@ func run(log *slog.Logger, cfgPath, listen, dataDir, baseURL string) error {
 	sshRunner := action.NewSSHRunner(cipher)
 	// cdtCtl 把「拿库里的凭据去操作阿里云实例」这件事收在一处，
 	// 超额动作（CDT 节省关机）和 CDT 后台循环都用它。
-	cdtCtl := cdtctl.New(st, cipher, log)
+	cdtCtl := cdtctl.New(st, cipher, notifier, log)
 	exec := action.NewExecutor(st, sshRunner, hub, cdtCtl)
 	fo := failover.New(st, cipher, notifier, hub, log)
 	eng := engine.New(st, exec, fo, notifier, log)

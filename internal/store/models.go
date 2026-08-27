@@ -410,6 +410,14 @@ type CDTInstance struct {
 	// Guarded 表示这台实例受熔断 / 保活 / 定时开关机管辖。
 	// 不打这个标记的实例，面板只看不动。
 	Guarded bool `json:"guarded"`
+	// PlannedStop 表示这台实例是**面板主动停的**（定时关机 / 流量熔断 / 手动停机）。
+	//
+	// 它存在的唯一理由是让保活别和定时关机打架：保活的职责是「被阿里云回收了
+	// 就拉起来」，而不是「只要停着就拉起来」。少了这个标记，定时关机刚把机器停掉，
+	// 保活下一轮就给拉回来了 —— 两个功能互相拆台。
+	//
+	// 面板主动开机（定时开机 / 账期恢复 / 手动开机）或观察到实例真的 Running 时清掉。
+	PlannedStop bool `json:"planned_stop"`
 
 	LastSynced time.Time `json:"last_synced"`
 	UpdatedAt  time.Time `json:"updated_at"`

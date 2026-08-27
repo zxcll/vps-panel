@@ -94,3 +94,19 @@ func TestStatusLabel(t *testing.T) {
 		}
 	}
 }
+
+// planned_stop 必须是**面板独占**的状态，探针心跳两个方向都碰不得。
+//
+// 这条钉的是用户报的第一个 bug：原本允许「上线方向」把它翻回 online，
+// 结果定时关机发出去之后，机器还要几十秒才真正断电，这期间探针**还在上报**，
+// 状态被翻回 online；等机器真关掉就落进离线分支，白发一条掉线告警。
+//
+// 直接读源码断言不现实，这里退一步钉住那个前提：planned_stop 属于
+// isManagedDown，而且它的解除**不该**由 onlineMessage 这条路径承担 ——
+// 真正的解除在 cdtctl.ClearNodePlannedStop，由实例的真实状态驱动。
+func TestPlannedStopIsPanelOwned(t *testing.T) {
+	if !isManagedDown(store.StatusPlannedStop) {
+		t.Fatal("planned_stop 必须算作「面板知道它为什么停」，" +
+			"否则机器一断心跳就会被翻成 offline 并发掉线告警")
+	}
+}

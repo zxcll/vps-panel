@@ -285,23 +285,40 @@ func TestApplyUpdatesHeartbeat(t *testing.T) {
 	}
 }
 
-// 已经超额的节点，探针的后续心跳不该把状态刷回 online，
-// 否则关机指令下发和状态展示会来回抖。
-func TestTouchDoesNotOverrideExceeded(t *testing.T) {
+// 面板自己设的那几个状态，探针的后续心跳都不该把它们刷回 online。
+//
+// 这条路径就是**线上真正走的那条** —— 入账和心跳在同一个事务里，用的是
+// Tx.TouchNode。它和 Store.TouchNode 曾经各写了一遍 SQL，加 planned_stop
+// 时只改了非事务那份，于是关机窗口里每一次上报都把节点刷成 online，
+// 等机器真断电就误报一条掉线。用户报的「关联了 CDT 定时关机还是提示离线」
+// 就是这么来的。
+//
+// 表驱动而不是只测 exceeded：store 那边再加状态时，这里漏掉就会挂。
+func TestTouchDoesNotOverridePanelOwnedStatus(t *testing.T) {
 	ctx := context.Background()
-	st := newTestStore(t)
-	node := newTestNode(t, st)
-	ing := New(st)
 
-	if err := st.SetNodeStatus(ctx, node.ID, store.StatusExceeded); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ing.Apply(ctx, node, protocol.Report{BootID: "b1", Iface: "eth0", Rx: 1, Tx: 1}); err != nil {
-		t.Fatal(err)
-	}
+	// 与 store.panelOwnedStatuses 对齐。
+	for _, status := range []string{
+		store.StatusExceeded,
+		store.StatusStopped,
+		store.StatusPlannedStop,
+	} {
+		st := newTestStore(t)
+		node := newTestNode(t, st)
+		ing := New(st)
 
-	got, _ := st.GetNode(ctx, node.ID)
-	if got.Status != store.StatusExceeded {
-		t.Errorf("超额状态被心跳覆盖成了 %q", got.Status)
+		if err := st.SetNodeStatus(ctx, node.ID, status); err != nil {
+			t.Fatal(err)
+		}
+		// 机器还没真关掉，探针还会再报几次。
+		if _, err := ing.Apply(ctx, node,
+			protocol.Report{BootID: "b1", Iface: "eth0", Rx: 1, Tx: 1}); err != nil {
+			t.Fatal(err)
+		}
+
+		got, _ := st.GetNode(ctx, node.ID)
+		if got.Status != status {
+			t.Errorf("状态 %q 被上报覆盖成了 %q", status, got.Status)
+		}
 	}
 }

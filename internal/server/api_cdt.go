@@ -455,7 +455,9 @@ func (s *Server) cdtPower(w http.ResponseWriter, r *http.Request, start bool) {
 	}
 
 	s.st.SetCDTInstanceStatus(ctx, inst.ID, status)
-	// 手动开关机同样要联动关联节点的状态，否则手动停完还是会收到掉线告警。
+	// 手动开关机同样要联动，否则：手动停完还会收到掉线告警，
+	// 而且保活下一轮就把机器又拉起来了。
+	s.st.SetCDTInstancePlannedStop(ctx, inst.ID, !start)
 	if start {
 		s.cdtCtl.ClearNodePlannedStop(ctx, inst.ID)
 	} else {

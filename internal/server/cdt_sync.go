@@ -340,6 +340,8 @@ func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount, reason
 			continue
 		}
 		s.st.SetCDTInstanceStatus(ctx, inst.ID, alicloud.StatusStopping)
+		// 打上「面板主动停的」标记，保活据此跳过它。
+		s.st.SetCDTInstancePlannedStop(ctx, inst.ID, true)
 		// 关键一步：告诉面板这台机器是**我们自己按计划停的**。
 		// 少了它，关联的节点会在几十秒后被判成掉线 —— 发告警、切域名，
 		// 把一次计划内的停机当成事故处理。
@@ -382,7 +384,19 @@ func (s *Server) cdtRollCycle(ctx context.Context, a *store.CDTAccount) {
 }
 
 // cdtStartGuarded 拉起一个账号下所有受守护、当前停着的实例。
+//
+// 定时关机窗口里一律不拉 —— 这里是「自动拉起」的唯一入口，堵在这一处，
+// 保活、账期翻页解除熔断都一起管住了。账期翻页尤其阴：它按月触发，
+// 撞进关机窗口的时候机器会莫名其妙自己开起来，等下一次定时关机才被关掉，
+// 中间那段时间白烧钱，而且用户很难把它和「月初」联系起来。
+//
+// 定时开机自己调这里是安全的：那一刻 now == AutoStartTime，按定义已经
+// 出了关机窗口（见 inScheduledOffWindow 的边界处理）。
 func (s *Server) cdtStartGuarded(ctx context.Context, a *store.CDTAccount) []string {
+	if inScheduledOffWindow(a, time.Now()) {
+		s.log.Debug("处于定时关机窗口，跳过自动拉起", "账号", a.Name)
+		return nil
+	}
 	client, err := s.cdtClient(ctx, a.ID)
 	if err != nil {
 		return nil
@@ -402,6 +416,7 @@ func (s *Server) cdtStartGuarded(ctx context.Context, a *store.CDTAccount) []str
 			continue
 		}
 		s.st.SetCDTInstanceStatus(ctx, inst.ID, alicloud.StatusStarting)
+		s.st.SetCDTInstancePlannedStop(ctx, inst.ID, false)
 		// 机器要回来了，把关联节点从「计划内停机」里放出来 ——
 		// 置回 unknown，让 engine 顺着心跳自然恢复成 online。
 		s.cdtCtl.ClearNodePlannedStop(ctx, inst.ID)
@@ -423,6 +438,14 @@ func (s *Server) cdtSyncInstances(ctx context.Context, a *store.CDTAccount) erro
 		return fmt.Errorf("拉取 ECS 实例失败：%w", err)
 	}
 
+	// 同步前先拿一份旧快照，好知道哪些实例的状态发生了变化。
+	prev := map[string]*store.CDTInstance{}
+	if old, err := s.st.CDTInstancesOf(ctx, a.ID); err == nil {
+		for _, o := range old {
+			prev[o.InstanceID] = o
+		}
+	}
+
 	keep := make(map[string]bool, len(list))
 	for _, inst := range list {
 		keep[inst.InstanceID] = true
@@ -439,6 +462,17 @@ func (s *Server) cdtSyncInstances(ctx context.Context, a *store.CDTAccount) erro
 			IsSpot:        inst.IsSpot,
 		}); err != nil {
 			return fmt.Errorf("保存实例失败：%w", err)
+		}
+
+		// 实例真的跑起来了，说明「计划内停机」这一段结束了。
+		//
+		// 用**实例的真实状态**来解除，而不是靠探针心跳 —— 机器执行关机要几十秒，
+		// 那期间探针还在上报，让心跳来解除的话会先把节点翻回 online，
+		// 等机器真关掉时就落进了掉线分支，白发一条告警。
+		if old := prev[inst.InstanceID]; old != nil && old.PlannedStop &&
+			inst.Status == alicloud.StatusRunning {
+			s.st.SetCDTInstancePlannedStop(ctx, old.ID, false)
+			s.cdtCtl.ClearNodePlannedStop(ctx, old.ID)
 		}
 	}
 	// 已经释放掉的实例要清出去，否则它会永远挂在界面上显示成上次的状态。
@@ -458,18 +492,21 @@ func (s *Server) cdtKeepAlive(ctx context.Context, a *store.CDTAccount) {
 	if !a.KeepAlive || a.Tripped() {
 		return
 	}
+	// 定时关机时段里一律不拉起。
+	//
+	// 保活的职责是「被阿里云回收了就拉起来」，不是「只要停着就拉起来」。
+	// 少了这一条，定时关机刚把机器停掉，保活下一轮就给拉回来了 ——
+	// 两个功能互相拆台，用户看到的现象就是「定时关机根本不生效」。
+	if inScheduledOffWindow(a, time.Now()) {
+		return
+	}
 	insts, err := s.st.CDTInstancesOf(ctx, a.ID)
 	if err != nil {
 		return
 	}
 
 	// 先看有没有活要干，没有就别去拿锁、更别去调阿里云。
-	var targets []*store.CDTInstance
-	for _, inst := range insts {
-		if inst.Guarded && inst.IsSpot {
-			targets = append(targets, inst)
-		}
-	}
+	targets := keepAliveTargets(insts)
 	if len(targets) == 0 {
 		return
 	}
@@ -518,6 +555,28 @@ func (s *Server) cdtKeepAlive(ctx context.Context, a *store.CDTAccount) {
 			Body: fmt.Sprintf("账号「%s」：%s", a.Name, msg),
 		})
 	}
+}
+
+// keepAliveTargets 挑出「保活该管」的实例。
+//
+// 三个条件缺一不可：
+//
+//	Guarded      没打守护标记的实例，面板只看不动
+//	IsSpot       只有抢占式实例会被阿里云回收；非抢占式停着一定是人为的，
+//	             自动拉起反而添乱
+//	!PlannedStop **这台机器是不是面板自己停的**
+//
+// 最后一条是修 bug 加的：保活的职责是「被阿里云回收了就拉起来」，
+// 不是「只要停着就拉起来」。少了它，定时关机刚把机器停掉，保活下一轮就给
+// 拉回来了 —— 两个功能互相拆台，用户看到的现象是「定时关机根本不生效」。
+func keepAliveTargets(insts []*store.CDTInstance) []*store.CDTInstance {
+	var out []*store.CDTInstance
+	for _, inst := range insts {
+		if inst.Guarded && inst.IsSpot && !inst.PlannedStop {
+			out = append(out, inst)
+		}
+	}
+	return out
 }
 
 // cdtHandleNoStock 处理「可用区售罄」。

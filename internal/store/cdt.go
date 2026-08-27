@@ -176,7 +176,8 @@ func scanCDTAccount(sc interface{ Scan(...any) error }) (*CDTAccount, error) {
 // --- 实例 ---
 
 const cdtInstanceColumns = `id, account_id, instance_id, instance_name, region_id, zone_id,
-	status, public_ip, instance_type, bandwidth_mbps, is_spot, guarded, last_synced, updated_at`
+	status, public_ip, instance_type, bandwidth_mbps, is_spot, guarded, planned_stop,
+	last_synced, updated_at`
 
 func (s *Store) ListCDTInstances(ctx context.Context) ([]*CDTInstance, error) {
 	return s.queryCDTInstances(ctx,
@@ -234,6 +235,17 @@ func (s *Store) SetCDTInstanceStatus(ctx context.Context, id int64, status strin
 	return err
 }
 
+// SetCDTInstancePlannedStop 标记/解除「这台实例是面板主动停的」。
+//
+// 保活靠它区分「被阿里云回收了」和「我们自己停的」—— 少了它，
+// 定时关机刚停完，保活下一轮就把机器拉回来了。
+func (s *Store) SetCDTInstancePlannedStop(ctx context.Context, id int64, planned bool) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE cdt_instances SET planned_stop=?, updated_at=? WHERE id = ?`,
+		boolInt(planned), timeVal(time.Now().UTC()), id)
+	return err
+}
+
 func (s *Store) SetCDTInstanceGuarded(ctx context.Context, id int64, guarded bool) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE cdt_instances SET guarded=?, updated_at=? WHERE id = ?`,
@@ -282,15 +294,16 @@ func (s *Store) queryCDTInstances(ctx context.Context, q string, args ...any) ([
 
 func scanCDTInstance(sc interface{ Scan(...any) error }) (*CDTInstance, error) {
 	var inst CDTInstance
-	var isSpot, guarded int
+	var isSpot, guarded, planned int
 	var synced, updated int64
 	if err := sc.Scan(&inst.ID, &inst.AccountID, &inst.InstanceID, &inst.InstanceName,
 		&inst.RegionID, &inst.ZoneID, &inst.Status, &inst.PublicIP, &inst.InstanceType,
-		&inst.BandwidthMbps, &isSpot, &guarded, &synced, &updated); err != nil {
+		&inst.BandwidthMbps, &isSpot, &guarded, &planned, &synced, &updated); err != nil {
 		return nil, err
 	}
 	inst.IsSpot = isSpot != 0
 	inst.Guarded = guarded != 0
+	inst.PlannedStop = planned != 0
 	inst.LastSynced = fromUnix(synced)
 	inst.UpdatedAt = fromUnix(updated)
 	return &inst, nil

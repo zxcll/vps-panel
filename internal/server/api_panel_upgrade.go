@@ -22,7 +22,7 @@ import (
 // panelVersion 是面板版本号。放在这里而不是 cmd/panel：
 // server 包要拿它和 GitHub 上的最新版比，而 main 包是没法被 import 的。
 // cmd/panel 反过来引用 server.PanelVersion()，保证只有一个来源。
-const panelVersion = "1.6.0"
+const panelVersion = "1.6.1"
 
 // PanelVersion 返回当前面板版本。
 func PanelVersion() string { return panelVersion }

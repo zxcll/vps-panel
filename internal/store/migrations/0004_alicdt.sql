@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS cdt_instances (
     bandwidth_mbps INTEGER NOT NULL DEFAULT 0,
     is_spot        INTEGER NOT NULL DEFAULT 0,
     guarded        INTEGER NOT NULL DEFAULT 0,
+    -- 这台实例是不是面板主动停的（定时关机/熔断/手动）。
+    -- 保活靠它区分「被阿里云回收了」和「我们自己停的」，否则两个功能会打架。
+    planned_stop   INTEGER NOT NULL DEFAULT 0,
     last_synced    INTEGER NOT NULL DEFAULT 0,
     updated_at     INTEGER NOT NULL
 );
