@@ -34,6 +34,10 @@ const (
 	// 用户可能把同步间隔设成 600 秒省 API 调用，那点完开关机要干等十分钟
 	// 界面才更新，会让人以为没生效又去点一次。状态落定之前先按这个频率盯着。
 	cdtTransitionPoll = 15 * time.Second
+	// cdtStopStatusLagWindow 是下发关机后容忍 DescribeInstances 仍返回旧 Running
+	// 状态的时间。这个接口存在短暂最终一致性；把旧值当成重新开机，会清掉
+	// planned_stop，随后保活就会把真正停下来的机器再次拉起。
+	cdtStopStatusLagWindow = 2 * time.Minute
 )
 
 // cdtGuard 保证同一个账号同时只有一条会改变机器状态的动作在跑。
@@ -446,9 +450,17 @@ func (s *Server) cdtSyncInstances(ctx context.Context, a *store.CDTAccount) erro
 		}
 	}
 
+	now := time.Now().UTC()
 	keep := make(map[string]bool, len(list))
 	for _, inst := range list {
 		keep[inst.InstanceID] = true
+		old := prev[inst.InstanceID]
+		skipUpdate, clearPlanned := cdtInstanceSyncDecision(old, inst.Status, now)
+		if skipUpdate {
+			s.log.Debug("忽略关机后的滞后 Running 状态",
+				"账号", a.Name, "实例", inst.InstanceID)
+			continue
+		}
 		if err := s.st.UpsertCDTInstance(ctx, &store.CDTInstance{
 			AccountID:     a.ID,
 			InstanceID:    inst.InstanceID,
@@ -469,8 +481,7 @@ func (s *Server) cdtSyncInstances(ctx context.Context, a *store.CDTAccount) erro
 		// 用**实例的真实状态**来解除，而不是靠探针心跳 —— 机器执行关机要几十秒，
 		// 那期间探针还在上报，让心跳来解除的话会先把节点翻回 online，
 		// 等机器真关掉时就落进了掉线分支，白发一条告警。
-		if old := prev[inst.InstanceID]; old != nil && old.PlannedStop &&
-			inst.Status == alicloud.StatusRunning {
+		if clearPlanned {
 			s.st.SetCDTInstancePlannedStop(ctx, old.ID, false)
 			s.cdtCtl.ClearNodePlannedStop(ctx, old.ID)
 		}
@@ -480,6 +491,29 @@ func (s *Server) cdtSyncInstances(ctx context.Context, a *store.CDTAccount) erro
 		s.log.Warn("清理已释放实例失败", "账号", a.Name, "err", err)
 	}
 	return nil
+}
+
+// cdtInstanceSyncDecision 判定一次云端状态同步应该怎样处理。
+//
+// 最重要的约束是：Stopping → Running 不是可靠的“重新开机”证据。关机接口
+// 返回成功之后，DescribeInstances 可能短时间仍给出请求前的 Running；旧实现
+// 在这里清掉 planned_stop，等实例真正 Stopped 后保活便会把它再次启动。
+//
+// 只有先观察到 Stopped / Starting，之后再看到 Running，才能证明实例经历过
+// 一次真实的启动。刚下关机指令时的滞后 Running 还会暂时跳过入库，以维持
+// Stopping 状态和 15 秒加急轮询；超过窗口后可更新展示状态，但仍不解除防护。
+func cdtInstanceSyncDecision(old *store.CDTInstance, remoteStatus string, now time.Time) (skipUpdate, clearPlanned bool) {
+	if old == nil || !old.PlannedStop {
+		return false, false
+	}
+	if old.Status == alicloud.StatusStopping && remoteStatus == alicloud.StatusRunning &&
+		!old.UpdatedAt.IsZero() && now.Sub(old.UpdatedAt) < cdtStopStatusLagWindow {
+		return true, false
+	}
+	if remoteStatus != alicloud.StatusRunning {
+		return false, false
+	}
+	return false, old.Status == alicloud.StatusStopped || old.Status == alicloud.StatusStarting
 }
 
 // --- 保活 ---

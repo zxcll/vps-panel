@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ import (
 // panelVersion 是面板版本号。放在这里而不是 cmd/panel：
 // server 包要拿它和 GitHub 上的最新版比，而 main 包是没法被 import 的。
 // cmd/panel 反过来引用 server.PanelVersion()，保证只有一个来源。
-const panelVersion = "1.6.1"
+const panelVersion = "1.6.2"
 
 // PanelVersion 返回当前面板版本。
 func PanelVersion() string { return panelVersion }
@@ -106,8 +107,46 @@ func (s *Server) handlePanelVersion(w http.ResponseWriter, r *http.Request) {
 	out["release_notes"] = latest.Body
 	out["release_url"] = latest.HTMLURL
 	out["published_at"] = latest.PublishedAt
-	out["has_update"] = latest.Version != "" && latest.Version != current
+	out["has_update"] = panelReleaseNewer(current, latest.Version)
 	writeJSON(w, http.StatusOK, out)
+}
+
+// panelReleaseNewer 只允许向更高版本升级，不能把“版本不同”直接当成“有更新”。
+//
+// 这在运行临时修复版时尤其重要：例如面板已经是 1.6.2，而 GitHub 最新正式版
+// 仍是 1.6.1，简单用 != 会把旧版显示成更新，点一下反而把修复降没了。
+func panelReleaseNewer(current, latest string) bool {
+	cur, okCur := parsePanelVersion(current)
+	newer, okNewer := parsePanelVersion(latest)
+	if !okCur || !okNewer {
+		return false
+	}
+	for i := range cur {
+		if newer[i] != cur[i] {
+			return newer[i] > cur[i]
+		}
+	}
+	return false
+}
+
+func parsePanelVersion(v string) ([3]int, bool) {
+	var out [3]int
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if cut := strings.IndexAny(v, "-+"); cut >= 0 {
+		v = v[:cut]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != len(out) {
+		return out, false
+	}
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // latestRelease 取 GitHub 上最新的 Release，带缓存。
@@ -223,10 +262,11 @@ func (s *Server) handlePanelUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if latest.Version == PanelVersion() {
+	if !panelReleaseNewer(PanelVersion(), latest.Version) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "replaced": false,
-			"message": fmt.Sprintf("已经是最新版 %s，无需升级", PanelVersion()),
+			"message": fmt.Sprintf("当前版本 %s 不低于发布版 %s，无需升级",
+				PanelVersion(), latest.Version),
 		})
 		return
 	}

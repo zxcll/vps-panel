@@ -416,7 +416,9 @@ type CDTInstance struct {
 	// 就拉起来」，而不是「只要停着就拉起来」。少了这个标记，定时关机刚把机器停掉，
 	// 保活下一轮就给拉回来了 —— 两个功能互相拆台。
 	//
-	// 面板主动开机（定时开机 / 账期恢复 / 手动开机）或观察到实例真的 Running 时清掉。
+	// 面板主动开机（定时开机 / 账期恢复 / 手动开机），或观察到实例确实经历了
+	// Stopped / Starting → Running 的启动过程时清掉。单独看到 Running 不够：
+	// 关机刚下发时云端列表接口可能还会短暂返回旧状态。
 	PlannedStop bool `json:"planned_stop"`
 
 	LastSynced time.Time `json:"last_synced"`
