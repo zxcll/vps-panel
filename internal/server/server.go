@@ -23,6 +23,7 @@ import (
 	"github.com/zxcll/vps-panel/internal/failover"
 	"github.com/zxcll/vps-panel/internal/ingest"
 	"github.com/zxcll/vps-panel/internal/notify"
+	"github.com/zxcll/vps-panel/internal/rotation"
 	"github.com/zxcll/vps-panel/internal/store"
 )
 
@@ -41,7 +42,8 @@ type Server struct {
 	// fwdSync 记着每个节点最近下发成功的转发规则版本，避免无谓重发。
 	fwdSync *forwardSyncer
 	// cdt 是阿里云 CDT 后台循环的状态：账号级动作锁 + 各档子任务的分频计时。
-	cdt *cdtGuard
+	cdt      *cdtGuard
+	rotation *rotation.Manager
 	// rel 缓存 GitHub 上的最新版信息，并保证同一时刻只有一个自更新在跑。
 	rel *releaseCache
 	// cdtCtl 是「拿库里的凭据去操作阿里云实例」那一层，和超额动作共用同一份。
@@ -61,7 +63,7 @@ func New(
 	cdtCtl *cdtctl.Controller,
 	log *slog.Logger,
 ) *Server {
-	return &Server{
+	srv := &Server{
 		cfg: cfg, st: st, cipher: cipher, hub: hub, ing: ing,
 		exec: exec, fo: fo, eng: eng, notifier: n, log: log,
 		trustProxy: cfg.TrustProxyHeaders,
@@ -70,6 +72,12 @@ func New(
 		rel:        &releaseCache{},
 		cdtCtl:     cdtCtl,
 	}
+	srv.rotation = rotation.New(st, rotationBackend{srv}, func(level, title, body string) {
+		log.Info(title, "detail", body)
+		st.AddEvent(context.Background(), nil, store.EventCDTAction, level, body)
+		n.Send(notify.Message{Level: level, Title: title, Body: body})
+	})
+	return srv
 }
 
 // Handler 组装全部路由。
@@ -145,6 +153,8 @@ func (s *Server) Handler() http.Handler {
 
 	// 阿里云 CDT。字面量段优先于通配符段，所以 /accounts 和 /instances
 	// 不会和 /{id} 打架。
+	auth("GET /api/cdt/rotation", s.handleGetCDTRotation)
+	auth("PUT /api/cdt/rotation", s.handleSaveCDTRotation)
 	auth("GET /api/cdt/accounts", s.handleListCDTAccounts)
 	auth("POST /api/cdt/accounts", s.handleCreateCDTAccount)
 	auth("PUT /api/cdt/accounts/{id}", s.handleUpdateCDTAccount)

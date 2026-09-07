@@ -247,6 +247,10 @@ func (s *Server) handleUpdateCDTAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if s.cdtRotationAccount(ctx, id) && (!req.Enabled || req.RegionID != a.RegionID || req.AccessKeyID != a.AccessKeyID) {
+		writeError(w, http.StatusConflict, "请先停用 CDT 换班计划，再停用账号或更换其身份、地域")
+		return
+	}
 	// Secret 留空表示不改。没有明文就没法实拨，也就认不了站点，
 	// 那就沿用库里已经存着的那个值 —— 总之不能把 "auto" 这个占位符落库。
 	var enc []byte
@@ -278,6 +282,10 @@ func (s *Server) handleDeleteCDTAccount(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx := r.Context()
+	if s.cdtRotationAccount(ctx, id) {
+		writeError(w, http.StatusConflict, "请先停用 CDT 换班计划，再删除账号")
+		return
+	}
 
 	a, err := s.st.GetCDTAccount(ctx, id)
 	if err != nil {
@@ -384,6 +392,15 @@ func (s *Server) handleGuardCDTInstance(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	inst, err := s.st.GetCDTInstance(r.Context(), id)
+	if err != nil {
+		handleStoreErr(w, err)
+		return
+	}
+	if !req.Guarded && s.cdtRotationAccount(r.Context(), inst.AccountID) {
+		writeError(w, http.StatusConflict, "请先停用 CDT 换班计划，再取消受守护")
+		return
+	}
 	if err := s.st.SetCDTInstanceGuarded(r.Context(), id, req.Guarded); err != nil {
 		handleStoreErr(w, err)
 		return
@@ -424,6 +441,10 @@ func (s *Server) cdtPower(w http.ResponseWriter, r *http.Request, start bool) {
 		return
 	}
 
+	if s.cdtRotationAccount(ctx, account.ID) {
+		writeError(w, http.StatusConflict, "该账号由 CDT 换班计划管理，请先停用计划再手动开关机")
+		return
+	}
 	// 同一个账号同时只允许一条动作在跑，避免和后台循环撞车。
 	if !s.cdtLock(account.ID) {
 		writeError(w, http.StatusConflict, "这个账号上正好有一个操作在执行，请稍后再试")

@@ -309,6 +309,7 @@ const RecordEditor = {
                     <select v-model="form.strategy">
                         <option value="failover">自动故障切换（按优先级选主）</option>
                         <option value="manual">仅手动切换</option>
+                        <option value="cdt_rotation">CDT 账号换班（在 CDT 页面配置窗口）</option>
                     </select>
                 </div>
                 <template v-if="form.strategy === 'failover'">
@@ -533,16 +534,17 @@ export const DNSView = {
                                 </td>
                                 <td>
                                     <div class="mono">{{ r.current_value || '未知' }}</div>
-                                    <div class="node-meta">{{ nodeName(r.current_node_id) }}</div>
+                                    <div class="node-meta">{{ r.strategy === 'cdt_rotation' ? '由 ECS 公网 IP 同步' : nodeName(r.current_node_id) }}</div>
                                 </td>
                                 <td>
                                     <div v-for="(m, i) in r.members" :key="m.node_id" class="node-meta">
                                         {{ i + 1 }}. {{ m.node_name || nodeName(m.node_id) }}
                                     </div>
-                                    <span v-if="!r.members || !r.members.length" class="muted">未配置</span>
+                                    <span v-if="!r.members || !r.members.length" class="muted">{{ r.strategy === 'cdt_rotation' ? '按 CDT 账号窗口' : '未配置' }}</span>
                                 </td>
                                 <td>
                                     <div v-if="r.strategy === 'manual'" class="muted">仅手动</div>
+                                    <div v-else-if="r.strategy === 'cdt_rotation'" class="muted">CDT 账号换班</div>
                                     <template v-else>
                                         <div v-if="r.switch_on_exceed" class="node-meta">流量耗尽</div>
                                         <div v-if="r.switch_on_offline" class="node-meta">节点离线</div>

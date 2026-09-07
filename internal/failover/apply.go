@@ -265,6 +265,9 @@ func (m *Manager) SwitchTo(ctx context.Context, recordID, nodeID int64) (Decisio
 	if err != nil {
 		return Decision{}, err
 	}
+	if rec.Strategy == store.StrategyCDTRotation {
+		return Decision{}, fmt.Errorf("该记录由 CDT 换班计划管理，请在 CDT 页面调整")
+	}
 	node, err := m.st.GetNode(ctx, nodeID)
 	if err != nil {
 		return Decision{}, fmt.Errorf("目标节点不存在: %w", err)

@@ -215,10 +215,13 @@ func (req *recordRequest) validate() error {
 	if req.Strategy == "" {
 		req.Strategy = store.StrategyFailover
 	}
-	if req.Strategy != store.StrategyFailover && req.Strategy != store.StrategyManual {
-		return fmt.Errorf("策略只能是 failover 或 manual")
+	if req.Strategy != store.StrategyFailover && req.Strategy != store.StrategyManual && req.Strategy != store.StrategyCDTRotation {
+		return fmt.Errorf("策略只能是 failover、manual 或 cdt_rotation")
 	}
 
+	if req.Strategy == store.StrategyCDTRotation && (req.RecordType != "A" || req.TTL > 1800) {
+		return fmt.Errorf("CDT 换班需要 A 记录，TTL 不超过 1800 秒")
+	}
 	seen := map[int64]bool{}
 	for _, m := range req.Members {
 		if m.NodeID <= 0 {
@@ -323,6 +326,10 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.rotationRecordInUse(ctx, id) {
+		writeError(w, http.StatusConflict, "请先停用 CDT 换班计划，再编辑其 DNS 记录")
+		return
+	}
 	req.applyTo(rec)
 	if err := s.st.UpdateDNSRecord(ctx, rec); err != nil {
 		handleStoreErr(w, err)
@@ -344,6 +351,10 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if s.rotationRecordInUse(r.Context(), id) {
+		writeError(w, http.StatusConflict, "请先停用 CDT 换班计划，再删除其 DNS 记录")
 		return
 	}
 	if err := s.st.DeleteDNSRecord(r.Context(), id); err != nil {

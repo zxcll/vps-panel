@@ -127,9 +127,12 @@ func (s *Server) cdtTick(ctx context.Context) {
 		// 账期翻页优先于一切：新的一个月额度重置了，被熔断停掉的机器
 		// 该先恢复，再谈别的。这一步只读本地状态，不打阿里云接口，
 		// 所以不受同步间隔限制。
-		s.cdtRollCycle(ctx, a)
+		managed := s.cdtRotationAccount(ctx, a.ID)
+		if !managed {
+			s.cdtRollCycle(ctx, a)
+		}
 
-		if scheduleDue {
+		if scheduleDue && !managed {
 			s.cdtRunSchedule(ctx, a)
 		}
 
@@ -144,17 +147,24 @@ func (s *Server) cdtTick(ctx context.Context) {
 			continue
 		}
 
-		// 过渡态只刷实例状态就够了 —— 流量和账单那边根本不会因为一次开关机
-		// 有什么变化，白白多打两次接口。
-		if transitioning {
+		// 普通账号过渡态只刷新实例；换班账号仍核实额度，避免一直处于
+		// Starting/Stopping 时跳过流量保护。
+		if transitioning && !managed {
 			s.cdtSyncInstances(ctx, a)
 			continue
 		}
 		s.cdtCheckTraffic(ctx, a)
 		s.cdtSyncInstances(ctx, a)
-		s.cdtKeepAlive(ctx, a)
+		if !managed {
+			s.cdtKeepAlive(ctx, a)
+		}
 	}
 
+	if s.rotation != nil && s.cdtDue("rotation", cdtTransitionPoll, time.Now()) {
+		if err := s.rotation.Tick(ctx); err != nil {
+			s.log.Debug("CDT 换班等待重试", "err", err)
+		}
+	}
 	s.cdtDailyReport(ctx, now)
 }
 
@@ -280,12 +290,8 @@ func (s *Server) cdtSyncBill(ctx context.Context, a *store.CDTAccount,
 
 // cdtTrip 执行熔断：把这个账号下所有受守护的实例停掉。
 //
-// 顺序和 engine.handleExceed 一致 —— **先落标记再动机器**。
-// 停机不可逆，进程在中途崩了的话，宁可漏执行也不能重复执行。
+// 先记录持续有效的熔断意图，再请求停机。未停下的实例会在后续检查中重试。
 func (s *Server) cdtTrip(ctx context.Context, a *store.CDTAccount, cycle, reason string) {
-	if a.Tripped() {
-		return // 已经熔断过了，别重复停。
-	}
 	if !s.cdtLock(a.ID) {
 		return
 	}
@@ -293,7 +299,15 @@ func (s *Server) cdtTrip(ctx context.Context, a *store.CDTAccount, cycle, reason
 
 	// 重新读一次：可能在拿锁的这段时间里，别的路径已经把它熔断了。
 	fresh, err := s.st.GetCDTAccount(ctx, a.ID)
-	if err != nil || fresh.Tripped() {
+	if err != nil {
+		return
+	}
+	if fresh.Tripped() {
+		// A persisted trip is an ongoing stop intent, not proof of successful power-off.
+		_, failed := s.cdtStopGuarded(ctx, fresh, fresh.TrippedReason)
+		if len(failed) > 0 {
+			s.log.Warn("CDT 熔断停机重试失败", "账号", fresh.Name, "失败", failed)
+		}
 		return
 	}
 
@@ -311,7 +325,7 @@ func (s *Server) cdtTrip(ctx context.Context, a *store.CDTAccount, cycle, reason
 	body := msg
 	switch {
 	case len(stopped) > 0:
-		body += "\n已停机：" + strings.Join(stopped, "、")
+		body += "\n已下发停机指令：" + strings.Join(stopped, "、")
 	case len(failed) == 0:
 		body += "\n（这个账号没有标记为「受守护」的实例，只告警不停机）"
 	}
@@ -336,10 +350,14 @@ func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount, reason
 	}
 
 	for _, inst := range insts {
-		if !inst.Guarded || inst.Status == alicloud.StatusStopped {
+		if !inst.Guarded || (inst.Status == alicloud.StatusStopped || inst.Status == alicloud.StatusStopping) {
 			continue
 		}
-		if err := client.StopInstance(ctx, inst.InstanceID, a.ShutdownMode); err != nil {
+		mode := a.ShutdownMode
+		if s.cdtRotationAccount(ctx, a.ID) {
+			mode = alicloud.StopModeCharging
+		}
+		if err := client.StopInstance(ctx, inst.InstanceID, mode); err != nil {
 			failed = append(failed, fmt.Sprintf("%s：%v", instLabel(inst), err))
 			continue
 		}
@@ -357,6 +375,9 @@ func (s *Server) cdtStopGuarded(ctx context.Context, a *store.CDTAccount, reason
 
 // cdtRollCycle 处理账期翻页：新的一个月额度重置了，解除熔断并把机器拉回来。
 func (s *Server) cdtRollCycle(ctx context.Context, a *store.CDTAccount) {
+	if s.cdtRotationAccount(ctx, a.ID) {
+		return
+	}
 	if !a.Tripped() {
 		return
 	}
@@ -523,7 +544,7 @@ func cdtInstanceSyncDecision(old *store.CDTInstance, remoteStatus string, now ti
 // 只对开了 keep_alive、且没有处于熔断状态的账号做。熔断状态下机器是
 // 「面板故意停的」，保活再把它拉起来就成了自己和自己打架。
 func (s *Server) cdtKeepAlive(ctx context.Context, a *store.CDTAccount) {
-	if !a.KeepAlive || a.Tripped() {
+	if !a.KeepAlive || a.Tripped() || s.cdtRotationAccount(ctx, a.ID) {
 		return
 	}
 	// 定时关机时段里一律不拉起。
@@ -666,6 +687,9 @@ func (s *Server) cdtRunSchedule(ctx context.Context, a *store.CDTAccount) {
 }
 
 func (s *Server) cdtScheduledPower(ctx context.Context, a *store.CDTAccount, start bool) {
+	if s.cdtRotationAccount(ctx, a.ID) {
+		return
+	}
 	if !s.cdtLock(a.ID) {
 		return
 	}
@@ -675,10 +699,9 @@ func (s *Server) cdtScheduledPower(ctx context.Context, a *store.CDTAccount, sta
 	action := "定时关机"
 	if start {
 		action = "定时开机"
-		// 定时开机顺带解除熔断：用户既然安排了每天这个点开机，
-		// 就不该让上个月的熔断标记一直把它按在那儿。
+		// Scheduled starts cannot override a current billing-cycle trip.
 		if a.Tripped() {
-			s.st.ClearCDTTripped(ctx, a.ID)
+			return
 		}
 		names = s.cdtStartGuarded(ctx, a)
 	} else {

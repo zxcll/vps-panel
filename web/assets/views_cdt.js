@@ -4,6 +4,7 @@
 // 只算出方向、还分中国内地/非中国内地两个池；探针那套是按单机网卡算的。
 // 两者口径不同，页面上也就不放在一起比。
 
+import { CDTRotationPanel } from "./views_cdt_rotation.js";
 import { computed, onMounted, reactive, ref } from "vue";
 import {
     api, CDT_REGIONS, CDT_SHUTDOWN_MODES, CDT_SITES,
@@ -236,9 +237,13 @@ const AccountEditor = {
 };
 
 export const CDTView = {
-    components: { AccountEditor, Modal },
+    components: { AccountEditor, Modal, CDTRotationPanel },
     setup() {
         const accounts = ref([]);
+        const rotationConfig = ref({ enabled: false, slots: [] });
+        function rotationManaged(id) {
+            return rotationConfig.value.enabled && rotationConfig.value.slots.some(s => s.account_id === id);
+        }
         const loading = ref(true);
         const editAccount = ref(null);
         const showEditor = ref(false);
@@ -362,7 +367,7 @@ export const CDTView = {
         }
 
         return {
-            accounts, loading, editAccount, showEditor, busy, instBusy,
+            accounts, rotationConfig, rotationManaged, loading, editAccount, showEditor, busy, instBusy,
             load, openNew, openEdit, onSaved, remove, syncNow, test,
             toggleGuard, power, statusMeta, meterClass, fmtBytes, fmtTime,
         };
@@ -380,6 +385,7 @@ export const CDTView = {
                 </div>
             </div>
 
+            <CDTRotationPanel :accounts="accounts" @updated="rotationConfig = $event" />
             <div v-if="loading" class="empty"><span class="spinner"></span>加载中</div>
 
             <div v-else-if="!accounts.length" class="empty">
@@ -393,6 +399,7 @@ export const CDTView = {
                     <div>
                         <div class="card-title">
                             {{ a.name }}
+                            <span v-if="rotationManaged(a.id)" class="badge good">换班计划管理中</span>
                             <span class="badge muted">{{ a.site_label }}</span>
                             <span class="badge muted">{{ a.region_id }}</span>
                             <span v-if="!a.enabled" class="badge muted"><span class="dot"></span>已停用</span>
@@ -427,7 +434,8 @@ export const CDTView = {
                 </div>
                 <div v-if="a.tripped_reason" class="notice error" style="margin-bottom:12px">
                     <b>已熔断停机</b>（账期 {{ a.tripped_cycle }}）：{{ a.tripped_reason }}<br>
-                    新账期开始时会自动解除并把受守护的实例拉起来；也可以手动启动实例来立即解除。
+                    <template v-if="rotationManaged(a.id)">新账期核实流量恢复后，按换班窗口自动启动。</template>
+                    <template v-else>新账期开始时会自动解除并把受守护的实例拉起来；也可以手动启动实例来立即解除。</template>
                 </div>
                 <div v-if="a.nostock_notified" class="notice error" style="margin-bottom:12px">
                     抢占式实例所在可用区售罄，保活正在持续重试。
@@ -534,15 +542,15 @@ export const CDTView = {
                                 <td>
                                     <label class="checkbox-label">
                                         <input type="checkbox" :checked="inst.guarded"
-                                               :disabled="instBusy === inst.id"
+                                               :disabled="instBusy === inst.id || rotationManaged(a.id)"
                                                @change="toggleGuard(inst)">
                                     </label>
                                 </td>
                                 <td>
                                     <div class="btn-row">
-                                        <button class="btn small" :disabled="instBusy === inst.id"
+                                        <button class="btn small" :disabled="instBusy === inst.id || rotationManaged(a.id)"
                                                 @click="power(inst, true)">启动</button>
-                                        <button class="btn small danger" :disabled="instBusy === inst.id"
+                                        <button class="btn small danger" :disabled="instBusy === inst.id || rotationManaged(a.id)"
                                                 @click="power(inst, false)">停止</button>
                                     </div>
                                 </td>
